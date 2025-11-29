@@ -7,6 +7,7 @@ A command-line toolkit for USB device management on Windows.
 - List all connected USB storage devices
 - View detailed information about specific USB drives
 - Format USB drives with various filesystems (FAT32, NTFS, exFAT)
+- Safely eject USB drives
 - JSON output mode for programmatic use
 - PowerShell 7 backend for reliable device enumeration
 
@@ -135,6 +136,26 @@ wusbkit format 2 --fs ntfs --label DATA --yes
 | exFAT      | 16 EB         | Good           | Large files, cross-platform |
 | NTFS       | 16 EB         | Windows only   | Windows-only, permissions |
 
+### Eject USB Drive
+
+Safely eject a USB storage device (same as "Safely Remove Hardware").
+
+```bash
+# By drive letter
+wusbkit eject E:
+wusbkit eject E
+
+# By disk number
+wusbkit eject 2
+
+# Skip confirmation
+wusbkit eject E: --yes
+wusbkit eject E: -y
+
+# JSON output
+wusbkit eject E: --json
+```
+
 ### Show Version
 
 Display version and build information.
@@ -215,6 +236,7 @@ wusbkit/
 │   ├── list.go             # list command
 │   ├── info.go             # info command
 │   ├── format.go           # format command
+│   ├── eject.go            # eject command
 │   └── version.go          # version command
 ├── internal/
 │   ├── powershell/
