@@ -36,18 +36,20 @@ The drive can be specified by:
   - Drive letter (e.g., E: or E)
   - Disk number (e.g., 2)
 
-Supported image formats:
-  - Raw images: .img, .iso, .bin, .raw
-  - Compressed: .zip (streams first image file inside)`,
+Supported image sources:
+  - Local files: .img, .iso, .bin, .raw
+  - Local compressed: .zip (streams first image file inside)
+  - Remote URLs: HTTP/HTTPS URLs (streams directly without downloading)`,
 	Example: `  wusbkit flash 2 --image ubuntu.img
   wusbkit flash E: --image recovery.zip --verify
-  wusbkit flash 2 --image debian.iso --yes --json`,
+  wusbkit flash 2 --image debian.iso --yes --json
+  wusbkit flash E: --image https://example.com/image.img`,
 	Args: cobra.ExactArgs(1),
 	RunE: runFlash,
 }
 
 func init() {
-	flashCmd.Flags().StringVarP(&flashImage, "image", "i", "", "Path to the image file (required)")
+	flashCmd.Flags().StringVarP(&flashImage, "image", "i", "", "Path to image file or URL (required)")
 	flashCmd.Flags().BoolVar(&flashVerify, "verify", false, "Verify write by reading back and comparing")
 	flashCmd.Flags().BoolVarP(&flashYes, "yes", "y", false, "Skip confirmation prompt")
 	flashCmd.MarkFlagRequired("image")
@@ -57,15 +59,20 @@ func init() {
 func runFlash(cmd *cobra.Command, args []string) error {
 	identifier := args[0]
 
-	// Validate image file exists
-	if _, err := os.Stat(flashImage); os.IsNotExist(err) {
-		errMsg := fmt.Sprintf("Image file not found: %s", flashImage)
-		if jsonOutput {
-			output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
-		} else {
-			PrintError(errMsg, output.ErrCodeInvalidInput)
+	// Check if image is a URL (skip file existence check for URLs)
+	isURL := flash.IsURL(flashImage)
+
+	// Validate local image file exists (skip for URLs)
+	if !isURL {
+		if _, err := os.Stat(flashImage); os.IsNotExist(err) {
+			errMsg := fmt.Sprintf("Image file not found: %s", flashImage)
+			if jsonOutput {
+				output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
+			} else {
+				PrintError(errMsg, output.ErrCodeInvalidInput)
+			}
+			return errors.New(errMsg)
 		}
-		return errors.New(errMsg)
 	}
 
 	// Check for admin privileges
