@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	// Buffer size for read/write operations (1 MB, matching Chrome)
-	bufferSize = 1 << 20
+	// Buffer size for read/write operations (4 MB, matching Linux recovery script)
+	bufferSize = 4 << 20
 
 	// Alignment required for unbuffered I/O (4 KB)
 	alignment = 4096
