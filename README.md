@@ -7,6 +7,7 @@ A command-line toolkit for USB device management on Windows.
 - List all connected USB storage devices
 - View detailed information about specific USB drives
 - Format USB drives with various filesystems (FAT32, NTFS, exFAT)
+- Flash disk images to USB drives (local files or remote URLs)
 - Safely eject USB drives
 - JSON output mode for programmatic use
 - PowerShell 7 backend for reliable device enumeration
@@ -136,6 +137,40 @@ wusbkit format 2 --fs ntfs --label DATA --yes
 | exFAT      | 16 EB         | Good           | Large files, cross-platform |
 | NTFS       | 16 EB         | Windows only   | Windows-only, permissions |
 
+### Flash USB Drive
+
+Write a disk image directly to a USB drive (raw write).
+
+> **Warning:** This will completely overwrite the target drive!
+
+```bash
+# Flash from local image file
+wusbkit flash E: --image ubuntu.img
+wusbkit flash 2 --image debian.iso
+
+# Flash from compressed archive (extracts first image file)
+wusbkit flash E: --image recovery.zip
+
+# Flash directly from URL (streams without downloading)
+wusbkit flash E: --image https://example.com/image.img
+
+# Verify after writing
+wusbkit flash E: --image ubuntu.img --verify
+
+# Skip confirmation prompt
+wusbkit flash E: --image ubuntu.img --yes
+
+# JSON output for progress
+wusbkit flash 2 --image debian.iso --json --yes
+```
+
+**Supported image sources:**
+| Source | Formats | Notes |
+|--------|---------|-------|
+| Local files | .img, .iso, .bin, .raw | Direct raw write |
+| Local archives | .zip | Extracts first image file |
+| Remote URLs | HTTP/HTTPS | Streams directly to drive |
+
 ### Eject USB Drive
 
 Safely eject a USB storage device (same as "Safely Remove Hardware").
@@ -201,6 +236,7 @@ wusbkit format E: --json --yes
 - `USB_NOT_FOUND` - Specified USB device not found
 - `PWSH_NOT_FOUND` - PowerShell 7 not installed
 - `FORMAT_FAILED` - Format operation failed
+- `FLASH_FAILED` - Flash operation failed
 - `PERMISSION_DENIED` - Administrator privileges required
 - `INVALID_INPUT` - Invalid command input
 
@@ -236,6 +272,7 @@ wusbkit/
 │   ├── list.go             # list command
 │   ├── info.go             # info command
 │   ├── format.go           # format command
+│   ├── flash.go            # flash command
 │   ├── eject.go            # eject command
 │   └── version.go          # version command
 ├── internal/
@@ -247,6 +284,9 @@ wusbkit/
 │   ├── format/
 │   │   ├── diskpart.go     # diskpart script generation
 │   │   └── format.go       # Format orchestration
+│   ├── flash/
+│   │   ├── flash.go        # Flash orchestration
+│   │   └── source.go       # Image sources (file, zip, URL)
 │   └── output/
 │       ├── json.go         # JSON output helpers
 │       └── table.go        # pterm table formatters

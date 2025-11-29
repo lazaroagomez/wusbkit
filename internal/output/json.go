@@ -25,10 +25,11 @@ func PrintJSONError(message string, code string) {
 
 // Error codes
 const (
-	ErrCodeUSBNotFound    = "USB_NOT_FOUND"
-	ErrCodePwshNotFound   = "PWSH_NOT_FOUND"
-	ErrCodeFormatFailed   = "FORMAT_FAILED"
-	ErrCodePermDenied     = "PERMISSION_DENIED"
-	ErrCodeInvalidInput   = "INVALID_INPUT"
-	ErrCodeInternalError  = "INTERNAL_ERROR"
+	ErrCodeUSBNotFound   = "USB_NOT_FOUND"
+	ErrCodePwshNotFound  = "PWSH_NOT_FOUND"
+	ErrCodeFormatFailed  = "FORMAT_FAILED"
+	ErrCodeFlashFailed   = "FLASH_FAILED"
+	ErrCodePermDenied    = "PERMISSION_DENIED"
+	ErrCodeInvalidInput  = "INVALID_INPUT"
+	ErrCodeInternalError = "INTERNAL_ERROR"
 )
