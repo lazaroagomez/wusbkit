@@ -190,27 +190,17 @@ wusbkit format E: --json --yes
 - Go 1.21 or later
 - Windows 10/11
 
-### Build Commands
+### Build
 
 ```bash
-# Simple build
+# Using build script
+build.bat
+
+# Or manually
 go build -o dist/wusbkit.exe .
-
-# Build with version info
-go build -ldflags "-X github.com/lazaroagomez/wusbkit/cmd.Version=1.0.0 -X github.com/lazaroagomez/wusbkit/cmd.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/wusbkit.exe .
-
-# Using Make (if available)
-make build
-make clean
 ```
 
-### Install to GOPATH
-
-```bash
-go install .
-# or
-make install
-```
+Releases are automatically created via GitHub Actions when pushing to main.
 
 ## Project Structure
 
@@ -218,7 +208,8 @@ make install
 wusbkit/
 ├── main.go                 # Entry point
 ├── go.mod                  # Go module definition
-├── Makefile                # Build automation
+├── build.bat               # Build script
+├── VERSION                 # Current version number
 ├── cmd/
 │   ├── root.go             # Root command, global flags
 │   ├── list.go             # list command

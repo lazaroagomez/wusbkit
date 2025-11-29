@@ -1,0 +1,71 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Read version
+        id: version
+        run: |
+          $version = Get-Content VERSION -Raw
+          $version = $version.Trim()
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      - name: Build
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $date = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
+          go build -ldflags "-X github.com/lazaroagomez/wusbkit/cmd.Version=$version -X github.com/lazaroagomez/wusbkit/cmd.BuildDate=$date" -o wusbkit.exe .
+        shell: pwsh
+
+      - name: Delete existing release
+        run: gh release delete "v${{ steps.version.outputs.VERSION }}" --yes || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete existing tag
+        run: |
+          git tag -d "v${{ steps.version.outputs.VERSION }}" 2>$null || true
+          git push origin --delete "v${{ steps.version.outputs.VERSION }}" 2>$null || true
+        shell: pwsh
+        continue-on-error: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          name: wusbkit v${{ steps.version.outputs.VERSION }}
+          body: |
+            ## wusbkit v${{ steps.version.outputs.VERSION }}
+
+            USB device management CLI toolkit for Windows.
+
+            ### Download
+            - `wusbkit.exe` - Windows executable
+
+            ### Requirements
+            - Windows 10/11
+            - PowerShell 7 (pwsh.exe)
+          files: wusbkit.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
