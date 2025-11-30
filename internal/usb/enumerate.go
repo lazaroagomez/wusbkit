@@ -208,3 +208,24 @@ func (e *Enumerator) getOperationalStatus(status interface{}) string {
 		return "Unknown"
 	}
 }
+
+// IsSystemDisk checks if a disk contains system/boot/recovery partitions
+func (e *Enumerator) IsSystemDisk(diskNumber int) (bool, error) {
+	// Check for System, Reserved, or Recovery partitions, or if C: drive is on this disk
+	cmd := fmt.Sprintf(`
+		$parts = Get-Partition -DiskNumber %d -ErrorAction SilentlyContinue | Where-Object {
+			$_.Type -eq 'System' -or
+			$_.Type -eq 'Reserved' -or
+			$_.Type -eq 'Recovery' -or
+			$_.DriveLetter -eq 'C'
+		}
+		if ($parts) { 'true' } else { 'false' }
+	`, diskNumber)
+
+	output, err := e.ps.Execute(cmd)
+	if err != nil {
+		return false, err
+	}
+
+	return strings.TrimSpace(string(output)) == "true", nil
+}
