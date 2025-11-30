@@ -21,10 +21,12 @@ import (
 )
 
 var (
-	flashImage  string
-	flashVerify bool
-	flashYes    bool
-	flashBuffer string
+	flashImage        string
+	flashVerify       bool
+	flashYes          bool
+	flashBuffer       string
+	flashHash         bool
+	flashSkipUnchanged bool
 )
 
 var flashCmd = &cobra.Command{
@@ -55,6 +57,8 @@ func init() {
 	flashCmd.Flags().BoolVar(&flashVerify, "verify", false, "Verify write by reading back and comparing")
 	flashCmd.Flags().BoolVarP(&flashYes, "yes", "y", false, "Skip confirmation prompt")
 	flashCmd.Flags().StringVarP(&flashBuffer, "buffer", "b", "4M", "Buffer size (e.g., 4M, 8MB)")
+	flashCmd.Flags().BoolVar(&flashHash, "hash", false, "Calculate and display SHA-256 hash")
+	flashCmd.Flags().BoolVar(&flashSkipUnchanged, "skip-unchanged", false, "Skip writing sectors that haven't changed")
 	flashCmd.MarkFlagRequired("image")
 	rootCmd.AddCommand(flashCmd)
 }
@@ -225,10 +229,12 @@ func runFlash(cmd *cobra.Command, args []string) error {
 
 	// Prepare flash options
 	opts := flash.Options{
-		DiskNumber: device.DiskNumber,
-		ImagePath:  flashImage,
-		Verify:     flashVerify,
-		BufferSize: bufferMB,
+		DiskNumber:    device.DiskNumber,
+		ImagePath:     flashImage,
+		Verify:        flashVerify,
+		BufferSize:    bufferMB,
+		CalculateHash: flashHash,
+		SkipUnchanged: flashSkipUnchanged,
 	}
 
 	flasher := flash.NewFlasher()
@@ -267,10 +273,16 @@ func runFlash(cmd *cobra.Command, args []string) error {
 				spinner.Fail(progress.Error)
 
 			case flash.StatusComplete:
+				msg := "Flash complete!"
 				if flashVerify {
-					spinner.Success("Flash complete! (verified)")
-				} else {
-					spinner.Success("Flash complete!")
+					msg += " (verified)"
+				}
+				spinner.Success(msg)
+				if progress.Hash != "" {
+					pterm.Info.Printf("SHA-256: %s\n", progress.Hash)
+				}
+				if progress.BytesSkipped > 0 {
+					pterm.Info.Printf("Skipped: %s (unchanged)\n", flash.FormatBytes(progress.BytesSkipped))
 				}
 			}
 		}

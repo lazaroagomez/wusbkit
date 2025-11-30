@@ -3,7 +3,9 @@ package flash
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"hash"
 	"time"
 )
 
@@ -34,14 +36,18 @@ type Progress struct {
 	Speed        string `json:"speed"`
 	Status       string `json:"status"`
 	Error        string `json:"error,omitempty"`
+	Hash         string `json:"hash,omitempty"`
+	BytesSkipped int64  `json:"bytes_skipped,omitempty"`
 }
 
 // Options configures the flash operation
 type Options struct {
-	DiskNumber int
-	ImagePath  string
-	Verify     bool
-	BufferSize int // Buffer size in MB (default: 4)
+	DiskNumber    int
+	ImagePath     string
+	Verify        bool
+	BufferSize    int  // Buffer size in MB (default: 4)
+	CalculateHash bool // Calculate SHA-256 hash while writing
+	SkipUnchanged bool // Skip writing sectors that haven't changed
 }
 
 // Flasher handles USB drive flashing operations
@@ -84,8 +90,9 @@ func (f *Flasher) Flash(ctx context.Context, opts Options) error {
 	}
 	defer writer.Close()
 
-	// Write the image
-	if err := f.writeImage(ctx, opts, source, writer, totalSize); err != nil {
+	// Write the image and get hash/skip stats
+	finalHash, bytesSkipped, err := f.writeImage(ctx, opts, source, writer, totalSize)
+	if err != nil {
 		return err
 	}
 
@@ -96,12 +103,13 @@ func (f *Flasher) Flash(ctx context.Context, opts Options) error {
 		}
 	}
 
-	f.sendComplete(opts, totalSize)
+	f.sendComplete(opts, totalSize, finalHash, bytesSkipped)
 	return nil
 }
 
 // writeImage writes the source to the disk with progress updates
-func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, writer *diskWriter, totalSize int64) error {
+// Returns: finalHash (empty if not calculated), bytesSkipped, error
+func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, writer *diskWriter, totalSize int64) (string, int64, error) {
 	// Calculate buffer size in bytes (with fallback to 4MB)
 	bufSize := opts.BufferSize << 20
 	if bufSize <= 0 {
@@ -109,13 +117,26 @@ func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, w
 	}
 	buffer := alignedBuffer(bufSize)
 	var bytesWritten int64
+	var bytesSkipped int64
 	startTime := time.Now()
+
+	// Initialize hash if requested
+	var hasher hash.Hash
+	if opts.CalculateHash {
+		hasher = sha256.New()
+	}
+
+	// Buffer for skip-write comparison
+	var diskBuffer []byte
+	if opts.SkipUnchanged {
+		diskBuffer = alignedBuffer(bufSize)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			f.sendError(opts, "operation cancelled")
-			return ctx.Err()
+			return "", 0, ctx.Err()
 		default:
 		}
 
@@ -126,11 +147,16 @@ func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, w
 				break
 			}
 			f.sendError(opts, fmt.Sprintf("read error: %v", err))
-			return err
+			return "", 0, err
 		}
 
 		if n == 0 {
 			break
+		}
+
+		// Update hash with actual data (before padding)
+		if hasher != nil {
+			hasher.Write(buffer[:n])
 		}
 
 		// Align write size for unbuffered I/O
@@ -144,11 +170,27 @@ func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, w
 			}
 		}
 
-		// Write to disk
-		written, err := writer.WriteAt(writeBuffer, bytesWritten)
-		if err != nil {
-			f.sendError(opts, fmt.Sprintf("write error at offset %d: %v", bytesWritten, err))
-			return err
+		// Skip-write: check if data on disk is already identical
+		shouldWrite := true
+		if opts.SkipUnchanged {
+			_, readErr := writer.ReadAt(diskBuffer[:writeSize], bytesWritten)
+			if readErr == nil && bytes.Equal(buffer[:n], diskBuffer[:n]) {
+				shouldWrite = false
+				bytesSkipped += int64(n)
+			}
+		}
+
+		// Write to disk only if needed
+		if shouldWrite {
+			written, err := writer.WriteAt(writeBuffer, bytesWritten)
+			if err != nil {
+				f.sendError(opts, fmt.Sprintf("write error at offset %d: %v", bytesWritten, err))
+				return "", 0, err
+			}
+			if written < writeSize {
+				bytesWritten += int64(n)
+				break
+			}
 		}
 
 		bytesWritten += int64(n)
@@ -163,14 +205,15 @@ func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, w
 
 		percentage := int(float64(bytesWritten) / float64(totalSize) * 100)
 		f.sendProgress(opts, StageWriting, percentage, bytesWritten, totalSize, speed)
-
-		// Check for actual write vs requested
-		if written < writeSize {
-			break
-		}
 	}
 
-	return nil
+	// Calculate final hash
+	finalHash := ""
+	if hasher != nil {
+		finalHash = fmt.Sprintf("%x", hasher.Sum(nil))
+	}
+
+	return finalHash, bytesSkipped, nil
 }
 
 // verifyImage reads back the written data and compares with source
@@ -273,7 +316,7 @@ func (f *Flasher) sendError(opts Options, errMsg string) {
 	}
 }
 
-func (f *Flasher) sendComplete(opts Options, totalBytes int64) {
+func (f *Flasher) sendComplete(opts Options, totalBytes int64, hash string, bytesSkipped int64) {
 	select {
 	case f.progressChan <- Progress{
 		Stage:        StageComplete,
@@ -281,6 +324,8 @@ func (f *Flasher) sendComplete(opts Options, totalBytes int64) {
 		BytesWritten: totalBytes,
 		TotalBytes:   totalBytes,
 		Status:       StatusComplete,
+		Hash:         hash,
+		BytesSkipped: bytesSkipped,
 	}:
 	default:
 	}
