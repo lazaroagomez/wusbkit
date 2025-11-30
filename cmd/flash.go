@@ -21,10 +21,14 @@ import (
 )
 
 var (
-	flashImage  string
-	flashVerify bool
-	flashYes    bool
-	flashBuffer string
+	flashImage         string
+	flashVerify        bool
+	flashYes           bool
+	flashBuffer        string
+	flashHash          bool
+	flashSkipUnchanged bool
+	flashMaxSize       string
+	flashForce         bool
 )
 
 var flashCmd = &cobra.Command{
@@ -40,12 +44,13 @@ The drive can be specified by:
 
 Supported image sources:
   - Local files: .img, .iso, .bin, .raw
-  - Local compressed: .zip (streams first image file inside)
+  - Compressed: .gz, .xz, .zst/.zstd (streaming decompression)
+  - Archives: .zip (streams first image file inside)
   - Remote URLs: HTTP/HTTPS URLs (streams directly without downloading)`,
 	Example: `  wusbkit flash 2 --image ubuntu.img
-  wusbkit flash E: --image recovery.zip --verify
+  wusbkit flash E: --image raspios.img.xz --verify
   wusbkit flash 2 --image debian.iso --yes --json
-  wusbkit flash E: --image https://example.com/image.img`,
+  wusbkit flash E: --image https://example.com/image.img --hash`,
 	Args: cobra.ExactArgs(1),
 	RunE: runFlash,
 }
@@ -55,8 +60,43 @@ func init() {
 	flashCmd.Flags().BoolVar(&flashVerify, "verify", false, "Verify write by reading back and comparing")
 	flashCmd.Flags().BoolVarP(&flashYes, "yes", "y", false, "Skip confirmation prompt")
 	flashCmd.Flags().StringVarP(&flashBuffer, "buffer", "b", "4M", "Buffer size (e.g., 4M, 8MB)")
+	flashCmd.Flags().BoolVar(&flashHash, "hash", false, "Calculate and display SHA-256 hash")
+	flashCmd.Flags().BoolVar(&flashSkipUnchanged, "skip-unchanged", false, "Skip writing sectors that haven't changed")
+	flashCmd.Flags().StringVar(&flashMaxSize, "max-size", "", "Maximum device size to allow (e.g., 64G, 256G)")
+	flashCmd.Flags().BoolVar(&flashForce, "force", false, "Override safety protections (system disk, size limits)")
 	flashCmd.MarkFlagRequired("image")
 	rootCmd.AddCommand(flashCmd)
+}
+
+// parseSize converts size strings like "64G", "256M", "1T" to bytes.
+func parseSize(s string) (int64, error) {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	if s == "" {
+		return 0, nil
+	}
+	s = strings.TrimSuffix(s, "B") // Remove trailing B if present
+
+	var multiplier int64 = 1
+	switch {
+	case strings.HasSuffix(s, "T"):
+		multiplier = 1024 * 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "G"):
+		multiplier = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "M"):
+		multiplier = 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "K"):
+		multiplier = 1024
+		s = s[:len(s)-1]
+	}
+
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size: %s", s)
+	}
+	return n * multiplier, nil
 }
 
 // parseBufferSize converts buffer size strings like "4M", "8MB", "16m" to megabytes.
@@ -142,6 +182,44 @@ func runFlash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Safety checks (can be overridden with --force)
+	if !flashForce {
+		// Check max size limit
+		if flashMaxSize != "" {
+			maxSize, err := parseSize(flashMaxSize)
+			if err != nil {
+				if jsonOutput {
+					output.PrintJSONError(err.Error(), output.ErrCodeInvalidInput)
+				} else {
+					PrintError(err.Error(), output.ErrCodeInvalidInput)
+				}
+				return err
+			}
+			if maxSize > 0 && device.Size > maxSize {
+				errMsg := fmt.Sprintf("Device size (%s) exceeds maximum allowed (%s). Use --force to override.",
+					device.SizeHuman, flashMaxSize)
+				if jsonOutput {
+					output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
+				} else {
+					PrintError(errMsg, output.ErrCodeInvalidInput)
+				}
+				return errors.New(errMsg)
+			}
+		}
+
+		// Check if this is a system disk
+		isSystem, _ := enum.IsSystemDisk(device.DiskNumber)
+		if isSystem {
+			errMsg := fmt.Sprintf("Disk %d appears to be a system disk. Use --force to override.", device.DiskNumber)
+			if jsonOutput {
+				output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
+			} else {
+				PrintError(errMsg, output.ErrCodeInvalidInput)
+			}
+			return errors.New(errMsg)
+		}
+	}
+
 	// Get image info for display
 	source, err := flash.OpenSource(flashImage)
 	if err != nil {
@@ -225,10 +303,12 @@ func runFlash(cmd *cobra.Command, args []string) error {
 
 	// Prepare flash options
 	opts := flash.Options{
-		DiskNumber: device.DiskNumber,
-		ImagePath:  flashImage,
-		Verify:     flashVerify,
-		BufferSize: bufferMB,
+		DiskNumber:    device.DiskNumber,
+		ImagePath:     flashImage,
+		Verify:        flashVerify,
+		BufferSize:    bufferMB,
+		CalculateHash: flashHash,
+		SkipUnchanged: flashSkipUnchanged,
 	}
 
 	flasher := flash.NewFlasher()
@@ -267,10 +347,16 @@ func runFlash(cmd *cobra.Command, args []string) error {
 				spinner.Fail(progress.Error)
 
 			case flash.StatusComplete:
+				msg := "Flash complete!"
 				if flashVerify {
-					spinner.Success("Flash complete! (verified)")
-				} else {
-					spinner.Success("Flash complete!")
+					msg += " (verified)"
+				}
+				spinner.Success(msg)
+				if progress.Hash != "" {
+					pterm.Info.Printf("SHA-256: %s\n", progress.Hash)
+				}
+				if progress.BytesSkipped > 0 {
+					pterm.Info.Printf("Skipped: %s (unchanged)\n", flash.FormatBytes(progress.BytesSkipped))
 				}
 			}
 		}
