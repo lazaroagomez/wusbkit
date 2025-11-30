@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/lazaroagomez/wusbkit/internal/flash"
@@ -23,6 +24,7 @@ var (
 	flashImage  string
 	flashVerify bool
 	flashYes    bool
+	flashBuffer string
 )
 
 var flashCmd = &cobra.Command{
@@ -52,8 +54,31 @@ func init() {
 	flashCmd.Flags().StringVarP(&flashImage, "image", "i", "", "Path to image file or URL (required)")
 	flashCmd.Flags().BoolVar(&flashVerify, "verify", false, "Verify write by reading back and comparing")
 	flashCmd.Flags().BoolVarP(&flashYes, "yes", "y", false, "Skip confirmation prompt")
+	flashCmd.Flags().StringVarP(&flashBuffer, "buffer", "b", "4M", "Buffer size (e.g., 4M, 8MB)")
 	flashCmd.MarkFlagRequired("image")
 	rootCmd.AddCommand(flashCmd)
+}
+
+// parseBufferSize converts buffer size strings like "4M", "8MB", "16m" to megabytes.
+// Returns the size in MB or an error if the format is invalid.
+func parseBufferSize(s string) (int, error) {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	s = strings.TrimSuffix(s, "B") // Remove trailing B if present (8MB -> 8M)
+
+	if strings.HasSuffix(s, "M") {
+		val, err := strconv.Atoi(strings.TrimSuffix(s, "M"))
+		if err != nil {
+			return 0, fmt.Errorf("invalid buffer size: %s", s)
+		}
+		return val, nil
+	}
+
+	// Try plain number (assume MB)
+	val, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid buffer size: %s (use format like 4M or 8MB)", s)
+	}
+	return val, nil
 }
 
 func runFlash(cmd *cobra.Command, args []string) error {
@@ -178,11 +203,32 @@ func runFlash(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
+	// Parse and validate buffer size
+	bufferMB, err := parseBufferSize(flashBuffer)
+	if err != nil {
+		if jsonOutput {
+			output.PrintJSONError(err.Error(), output.ErrCodeInvalidInput)
+		} else {
+			PrintError(err.Error(), output.ErrCodeInvalidInput)
+		}
+		return err
+	}
+	if bufferMB < 1 || bufferMB > 64 {
+		errMsg := fmt.Sprintf("buffer size must be between 1M and 64M (got %dM)", bufferMB)
+		if jsonOutput {
+			output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
+		} else {
+			PrintError(errMsg, output.ErrCodeInvalidInput)
+		}
+		return errors.New(errMsg)
+	}
+
 	// Prepare flash options
 	opts := flash.Options{
 		DiskNumber: device.DiskNumber,
 		ImagePath:  flashImage,
 		Verify:     flashVerify,
+		BufferSize: bufferMB,
 	}
 
 	flasher := flash.NewFlasher()

@@ -15,6 +15,9 @@ const (
 	StageComplete   = "Complete"
 )
 
+// defaultBufferSize is the fallback buffer size (4MB) when not specified
+const defaultBufferSize = 4 << 20
+
 // Status constants
 const (
 	StatusInProgress = "in_progress"
@@ -38,6 +41,7 @@ type Options struct {
 	DiskNumber int
 	ImagePath  string
 	Verify     bool
+	BufferSize int // Buffer size in MB (default: 4)
 }
 
 // Flasher handles USB drive flashing operations
@@ -98,7 +102,12 @@ func (f *Flasher) Flash(ctx context.Context, opts Options) error {
 
 // writeImage writes the source to the disk with progress updates
 func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, writer *diskWriter, totalSize int64) error {
-	buffer := alignedBuffer(bufferSize)
+	// Calculate buffer size in bytes (with fallback to 4MB)
+	bufSize := opts.BufferSize << 20
+	if bufSize <= 0 {
+		bufSize = defaultBufferSize
+	}
+	buffer := alignedBuffer(bufSize)
 	var bytesWritten int64
 	startTime := time.Now()
 
@@ -174,8 +183,13 @@ func (f *Flasher) verifyImage(ctx context.Context, opts Options, writer *diskWri
 	}
 	defer source.Close()
 
-	sourceBuffer := alignedBuffer(bufferSize)
-	diskBuffer := alignedBuffer(bufferSize)
+	// Calculate buffer size in bytes (with fallback to 4MB)
+	bufSize := opts.BufferSize << 20
+	if bufSize <= 0 {
+		bufSize = defaultBufferSize
+	}
+	sourceBuffer := alignedBuffer(bufSize)
+	diskBuffer := alignedBuffer(bufSize)
 	var bytesVerified int64
 	startTime := time.Now()
 

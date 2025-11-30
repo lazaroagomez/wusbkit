@@ -157,6 +157,10 @@ wusbkit flash E: --image https://example.com/image.img
 # Verify after writing
 wusbkit flash E: --image ubuntu.img --verify
 
+# Custom buffer size (default: 4M, range: 1M-64M)
+wusbkit flash E: --image ubuntu.img --buffer 8M
+wusbkit flash E: --image ubuntu.img -b 16MB
+
 # Skip confirmation prompt
 wusbkit flash E: --image ubuntu.img --yes
 
