@@ -10,9 +10,11 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/lazaroagomez/wusbkit/internal/flash"
 	"github.com/lazaroagomez/wusbkit/internal/format"
+	"github.com/lazaroagomez/wusbkit/internal/lock"
 	"github.com/lazaroagomez/wusbkit/internal/output"
 	"github.com/lazaroagomez/wusbkit/internal/powershell"
 	"github.com/lazaroagomez/wusbkit/internal/usb"
@@ -219,6 +221,28 @@ func runFlash(cmd *cobra.Command, args []string) error {
 			return errors.New(errMsg)
 		}
 	}
+
+	// Acquire exclusive lock on the disk
+	diskLock, err := lock.NewDiskLock(device.DiskNumber)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to create disk lock: %v", err)
+		if jsonOutput {
+			output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
+		} else {
+			PrintError(errMsg, output.ErrCodeInvalidInput)
+		}
+		return errors.New(errMsg)
+	}
+
+	if err := diskLock.TryLock(context.Background(), 2*time.Second); err != nil {
+		if jsonOutput {
+			output.PrintJSONError(err.Error(), output.ErrCodeInvalidInput)
+		} else {
+			PrintError(err.Error(), output.ErrCodeInvalidInput)
+		}
+		return err
+	}
+	defer diskLock.Unlock()
 
 	// Get image info for display
 	source, err := flash.OpenSource(flashImage)
