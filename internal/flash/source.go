@@ -2,6 +2,8 @@ package flash
 
 import (
 	"archive/zip"
+	"compress/gzip"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"mime"
@@ -11,6 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz"
 )
 
 // Source represents an image source that can be read sequentially.
@@ -27,7 +32,8 @@ type Source interface {
 }
 
 // OpenSource opens an image file and returns the appropriate Source implementation.
-// Supports: .img, .iso, .bin, .raw (raw) and .zip (streaming extraction).
+// Supports: .img, .iso, .bin, .raw (raw), .zip (streaming extraction),
+// and compressed formats: .gz, .xz, .zst/.zstd (streaming decompression).
 // Also supports HTTP/HTTPS URLs for remote image streaming.
 func OpenSource(path string) (Source, error) {
 	// Check if path is a URL and handle remote sources
@@ -41,6 +47,12 @@ func OpenSource(path string) (Source, error) {
 	switch ext {
 	case ".zip":
 		return newZipSource(path)
+	case ".gz", ".gzip":
+		return newGzipSource(path)
+	case ".xz":
+		return newXzSource(path)
+	case ".zst", ".zstd":
+		return newZstdSource(path)
 	case ".img", ".iso", ".bin", ".raw":
 		return newRawSource(path)
 	default:
@@ -166,6 +178,177 @@ func (z *zipSource) Close() error {
 
 func (z *zipSource) Name() string {
 	return z.name
+}
+
+// gzipSource decompresses gzip files on-the-fly
+type gzipSource struct {
+	file   *os.File
+	reader *gzip.Reader
+	size   int64
+	name   string
+}
+
+func newGzipSource(path string) (*gzipSource, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open gzip file: %w", err)
+	}
+
+	gzr, err := gzip.NewReader(file)
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to read gzip header: %w", err)
+	}
+
+	// Try to get uncompressed size from gzip footer (last 4 bytes = ISIZE)
+	size := getGzipUncompressedSize(file)
+
+	// Remove .gz extension for display name
+	name := filepath.Base(path)
+	name = strings.TrimSuffix(name, filepath.Ext(name))
+
+	return &gzipSource{
+		file:   file,
+		reader: gzr,
+		size:   size,
+		name:   name,
+	}, nil
+}
+
+// getGzipUncompressedSize reads the ISIZE field from gzip footer
+func getGzipUncompressedSize(file *os.File) int64 {
+	// Save current position
+	currentPos, err := file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0
+	}
+
+	// Seek to last 4 bytes (ISIZE field)
+	_, err = file.Seek(-4, io.SeekEnd)
+	if err != nil {
+		file.Seek(currentPos, io.SeekStart)
+		return 0
+	}
+
+	// Read ISIZE (little-endian uint32)
+	var isize uint32
+	err = binary.Read(file, binary.LittleEndian, &isize)
+	if err != nil {
+		file.Seek(currentPos, io.SeekStart)
+		return 0
+	}
+
+	// Restore position
+	file.Seek(currentPos, io.SeekStart)
+
+	return int64(isize)
+}
+
+func (g *gzipSource) Size() int64  { return g.size }
+func (g *gzipSource) Name() string { return g.name }
+
+func (g *gzipSource) Read(p []byte) (n int, err error) {
+	return g.reader.Read(p)
+}
+
+func (g *gzipSource) Close() error {
+	g.reader.Close()
+	return g.file.Close()
+}
+
+// xzSource decompresses xz files on-the-fly
+type xzSource struct {
+	file   *os.File
+	reader io.Reader
+	size   int64
+	name   string
+}
+
+func newXzSource(path string) (*xzSource, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open xz file: %w", err)
+	}
+
+	xzr, err := xz.NewReader(file)
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to read xz header: %w", err)
+	}
+
+	// XZ doesn't store uncompressed size in header, estimate from file size
+	info, _ := file.Stat()
+	estimatedSize := info.Size() * 5 // Typical compression ratio
+
+	// Remove .xz extension for display name
+	name := filepath.Base(path)
+	name = strings.TrimSuffix(name, filepath.Ext(name))
+
+	return &xzSource{
+		file:   file,
+		reader: xzr,
+		size:   estimatedSize,
+		name:   name,
+	}, nil
+}
+
+func (x *xzSource) Size() int64  { return x.size }
+func (x *xzSource) Name() string { return x.name }
+
+func (x *xzSource) Read(p []byte) (n int, err error) {
+	return x.reader.Read(p)
+}
+
+func (x *xzSource) Close() error {
+	return x.file.Close()
+}
+
+// zstdSource decompresses zstd files on-the-fly
+type zstdSource struct {
+	file   *os.File
+	reader *zstd.Decoder
+	size   int64
+	name   string
+}
+
+func newZstdSource(path string) (*zstdSource, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open zstd file: %w", err)
+	}
+
+	zr, err := zstd.NewReader(file)
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to read zstd header: %w", err)
+	}
+
+	// ZSTD doesn't always store uncompressed size, estimate from file size
+	info, _ := file.Stat()
+	estimatedSize := info.Size() * 4 // Typical compression ratio
+
+	// Remove .zst/.zstd extension for display name
+	name := filepath.Base(path)
+	name = strings.TrimSuffix(name, filepath.Ext(name))
+
+	return &zstdSource{
+		file:   file,
+		reader: zr,
+		size:   estimatedSize,
+		name:   name,
+	}, nil
+}
+
+func (z *zstdSource) Size() int64  { return z.size }
+func (z *zstdSource) Name() string { return z.name }
+
+func (z *zstdSource) Read(p []byte) (n int, err error) {
+	return z.reader.Read(p)
+}
+
+func (z *zstdSource) Close() error {
+	z.reader.Close()
+	return z.file.Close()
 }
 
 // httpClient is a shared HTTP client with appropriate timeouts for streaming.

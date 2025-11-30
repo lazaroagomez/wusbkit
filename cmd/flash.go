@@ -44,12 +44,13 @@ The drive can be specified by:
 
 Supported image sources:
   - Local files: .img, .iso, .bin, .raw
-  - Local compressed: .zip (streams first image file inside)
+  - Compressed: .gz, .xz, .zst/.zstd (streaming decompression)
+  - Archives: .zip (streams first image file inside)
   - Remote URLs: HTTP/HTTPS URLs (streams directly without downloading)`,
 	Example: `  wusbkit flash 2 --image ubuntu.img
-  wusbkit flash E: --image recovery.zip --verify
+  wusbkit flash E: --image raspios.img.xz --verify
   wusbkit flash 2 --image debian.iso --yes --json
-  wusbkit flash E: --image https://example.com/image.img`,
+  wusbkit flash E: --image https://example.com/image.img --hash`,
 	Args: cobra.ExactArgs(1),
 	RunE: runFlash,
 }
