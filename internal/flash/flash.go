@@ -204,6 +204,9 @@ func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, w
 		}
 
 		percentage := int(float64(bytesWritten) / float64(totalSize) * 100)
+		if percentage > 100 {
+			percentage = 100 // Cap at 100% (can exceed if size was estimated)
+		}
 		f.sendProgress(opts, StageWriting, percentage, bytesWritten, totalSize, speed)
 	}
 
@@ -285,6 +288,9 @@ func (f *Flasher) verifyImage(ctx context.Context, opts Options, writer *diskWri
 		}
 
 		percentage := int(float64(bytesVerified) / float64(totalSize) * 100)
+		if percentage > 100 {
+			percentage = 100 // Cap at 100% (can exceed if size was estimated)
+		}
 		f.sendProgress(opts, StageVerifying, percentage, bytesVerified, totalSize, speed)
 	}
 

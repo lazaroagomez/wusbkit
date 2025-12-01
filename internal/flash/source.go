@@ -215,19 +215,28 @@ func newGzipSource(path string) (*gzipSource, error) {
 	}, nil
 }
 
-// getGzipUncompressedSize reads the ISIZE field from gzip footer
+// getGzipUncompressedSize reads the ISIZE field from gzip footer and validates it.
+// The gzip ISIZE field is a 32-bit value that stores size modulo 2^32, so it wraps
+// for files > 4GB. When this happens, we estimate based on compressed file size.
 func getGzipUncompressedSize(file *os.File) int64 {
+	// Get compressed file size for validation/estimation
+	info, err := file.Stat()
+	if err != nil {
+		return 0
+	}
+	compressedSize := info.Size()
+
 	// Save current position
 	currentPos, err := file.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return 0
+		return compressedSize * 3 // Fallback estimate
 	}
 
 	// Seek to last 4 bytes (ISIZE field)
 	_, err = file.Seek(-4, io.SeekEnd)
 	if err != nil {
 		file.Seek(currentPos, io.SeekStart)
-		return 0
+		return compressedSize * 3 // Fallback estimate
 	}
 
 	// Read ISIZE (little-endian uint32)
@@ -235,13 +244,31 @@ func getGzipUncompressedSize(file *os.File) int64 {
 	err = binary.Read(file, binary.LittleEndian, &isize)
 	if err != nil {
 		file.Seek(currentPos, io.SeekStart)
-		return 0
+		return compressedSize * 3 // Fallback estimate
 	}
 
 	// Restore position
 	file.Seek(currentPos, io.SeekStart)
 
-	return int64(isize)
+	uncompressedSize := int64(isize)
+
+	// Validate ISIZE: if it's smaller than compressed size or seems wrapped (> 4GB file),
+	// the ISIZE field has wrapped around. Use estimation instead.
+	// A valid uncompressed size should always be >= compressed size.
+	if uncompressedSize < compressedSize {
+		// ISIZE wrapped around - estimate based on compressed size
+		// Use a conservative estimate (3x compression ratio typical for disk images)
+		return compressedSize * 3
+	}
+
+	// Additional sanity check: if compressed file is > 1GB and ISIZE < 1GB,
+	// it's very likely wrapped (disk images rarely compress better than 4:1)
+	const oneGB = 1 << 30
+	if compressedSize > oneGB && uncompressedSize < oneGB {
+		return compressedSize * 3
+	}
+
+	return uncompressedSize
 }
 
 func (g *gzipSource) Size() int64  { return g.size }
