@@ -32,4 +32,5 @@ const (
 	ErrCodePermDenied    = "PERMISSION_DENIED"
 	ErrCodeInvalidInput  = "INVALID_INPUT"
 	ErrCodeInternalError = "INTERNAL_ERROR"
+	ErrCodeDiskBusy      = "DISK_BUSY"
 )

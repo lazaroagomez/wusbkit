@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/lazaroagomez/wusbkit/internal/format"
+	"github.com/lazaroagomez/wusbkit/internal/lock"
 	"github.com/lazaroagomez/wusbkit/internal/output"
 	"github.com/lazaroagomez/wusbkit/internal/powershell"
 	"github.com/lazaroagomez/wusbkit/internal/usb"
@@ -113,6 +115,29 @@ func runFormat(cmd *cobra.Command, args []string) error {
 		}
 		return err
 	}
+
+	// Check if disk is being flashed
+	diskLock, err := lock.NewDiskLock(device.DiskNumber)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to create disk lock: %v", err)
+		if jsonOutput {
+			output.PrintJSONError(errMsg, output.ErrCodeInternalError)
+		} else {
+			PrintError(errMsg, output.ErrCodeInternalError)
+		}
+		return err
+	}
+
+	if err := diskLock.TryLock(cmd.Context(), 1*time.Second); err != nil {
+		errMsg := fmt.Sprintf("disk %d is currently being flashed by another operation", device.DiskNumber)
+		if jsonOutput {
+			output.PrintJSONError(errMsg, output.ErrCodeDiskBusy)
+		} else {
+			PrintError(errMsg, output.ErrCodeDiskBusy)
+		}
+		return errors.New(errMsg)
+	}
+	defer diskLock.Unlock()
 
 	// Confirmation prompt (unless --yes or --json)
 	if !formatYes && !jsonOutput {
