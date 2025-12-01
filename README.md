@@ -9,14 +9,18 @@ A command-line toolkit for USB device management on Windows.
 - Format USB drives with various filesystems (FAT32, NTFS, exFAT)
 - Flash disk images to USB drives (local files or remote URLs)
 - Safely eject USB drives
-- JSON output mode for programmatic use
+- JSON output mode for programmatic use and external application integration
 - PowerShell 7 backend for reliable device enumeration
+- Streaming decompression support (gzip, xz, zstd)
+- Real-time progress reporting with speed metrics
+- Disk locking to prevent concurrent operations
+- Signal handling for graceful cancellation (Ctrl+C)
 
 ## Requirements
 
 - Windows 10/11
 - [PowerShell 7](https://github.com/PowerShell/PowerShell/releases) (pwsh.exe)
-- Administrator privileges (for format operations)
+- Administrator privileges (for format and flash operations)
 
 ## Installation
 
@@ -148,7 +152,12 @@ Write a disk image directly to a USB drive (raw write).
 wusbkit flash E: --image ubuntu.img
 wusbkit flash 2 --image debian.iso
 
-# Flash from compressed archive (extracts first image file)
+# Flash from compressed image (streaming decompression)
+wusbkit flash E: --image ubuntu.img.gz
+wusbkit flash E: --image debian.iso.xz
+wusbkit flash E: --image arch.img.zst
+
+# Flash from ZIP archive (extracts first image file)
 wusbkit flash E: --image recovery.zip
 
 # Flash directly from URL (streams without downloading)
@@ -156,6 +165,12 @@ wusbkit flash E: --image https://example.com/image.img
 
 # Verify after writing
 wusbkit flash E: --image ubuntu.img --verify
+
+# Calculate SHA-256 hash during write
+wusbkit flash E: --image ubuntu.img --hash
+
+# Skip unchanged sectors (faster for partial updates)
+wusbkit flash E: --image ubuntu.img --skip-unchanged
 
 # Custom buffer size (default: 4M, range: 1M-64M)
 wusbkit flash E: --image ubuntu.img --buffer 8M
@@ -172,7 +187,8 @@ wusbkit flash 2 --image debian.iso --json --yes
 | Source | Formats | Notes |
 |--------|---------|-------|
 | Local files | .img, .iso, .bin, .raw | Direct raw write |
-| Local archives | .zip | Extracts first image file |
+| Compressed | .gz, .xz, .zst, .zstd | Streaming decompression |
+| Archives | .zip | Extracts first image file |
 | Remote URLs | HTTP/HTTPS | Streams directly to drive |
 
 ### Eject USB Drive
@@ -216,33 +232,242 @@ These flags work with all commands:
 | `--verbose` | `-v` | Show detailed/verbose output |
 | `--no-color` | | Disable colored output |
 
-## JSON Output
+## JSON Output and Integration
 
-All commands support `--json` flag for programmatic use:
+All commands support `--json` flag for programmatic use. This section provides detailed information for integrating wusbkit with external applications (Electron, Node.js, Python, etc.).
 
-```bash
-# List as JSON array
-wusbkit list --json
+### Output Protocol
 
-# Device info as JSON object
-wusbkit info E: --json
+- **stdout**: JSON data (success responses and progress updates)
+- **stderr**: JSON error objects
+- **Exit code 0**: Success
+- **Exit code 1**: Error (details in stderr)
 
-# Format progress as newline-delimited JSON
-wusbkit format E: --json --yes
-```
+### JSON Schemas
 
-**Error format:**
+#### Device Object
+
+Returned by `list` (as array) and `info` (as single object):
+
 ```json
-{"error": "USB drive E: not found", "code": "USB_NOT_FOUND"}
+{
+  "driveLetter": "E:",
+  "diskNumber": 2,
+  "friendlyName": "SanDisk Cruzer Glide",
+  "model": "Cruzer Glide",
+  "size": 30850000000,
+  "sizeHuman": "28.7 GB",
+  "serialNumber": "04016209041025010710",
+  "vendorId": "0781",
+  "productId": "5567",
+  "fileSystem": "FAT32",
+  "volumeLabel": "MYUSB",
+  "partitionStyle": "MBR",
+  "status": "Online",
+  "healthStatus": "Healthy",
+  "busType": "USB",
+  "mediaType": ""
+}
 ```
 
-**Error codes:**
-- `USB_NOT_FOUND` - Specified USB device not found
-- `PWSH_NOT_FOUND` - PowerShell 7 not installed
-- `FORMAT_FAILED` - Format operation failed
-- `FLASH_FAILED` - Flash operation failed
-- `PERMISSION_DENIED` - Administrator privileges required
-- `INVALID_INPUT` - Invalid command input
+#### Version Object
+
+Returned by `version --json`:
+
+```json
+{
+  "version": "1.2.6",
+  "buildDate": "2024-01-15",
+  "goVersion": "go1.21.5",
+  "platform": "windows/amd64",
+  "pwshVersion": "7.4.1"
+}
+```
+
+#### Eject Result
+
+Returned by `eject --json`:
+
+```json
+{
+  "success": true,
+  "driveLetter": "E:",
+  "diskNumber": 2,
+  "message": "USB drive E: ejected successfully"
+}
+```
+
+#### Error Object
+
+Written to stderr on errors:
+
+```json
+{
+  "error": "USB drive E: not found",
+  "code": "USB_NOT_FOUND"
+}
+```
+
+### Progress Streaming
+
+Long-running operations (`format` and `flash`) emit progress as **newline-delimited JSON** (NDJSON). Each line is a complete JSON object.
+
+#### Format Progress
+
+```json
+{"drive":"E:","diskNumber":2,"stage":"Cleaning","percentage":10,"status":"in_progress"}
+{"drive":"E:","diskNumber":2,"stage":"Creating partition","percentage":30,"status":"in_progress"}
+{"drive":"E:","diskNumber":2,"stage":"Formatting","percentage":50,"status":"in_progress"}
+{"drive":"E:","diskNumber":2,"stage":"Assigning drive letter","percentage":80,"status":"in_progress"}
+{"drive":"E:","diskNumber":2,"stage":"Complete","percentage":100,"status":"complete"}
+```
+
+#### Flash Progress
+
+```json
+{"stage":"Writing","percentage":15,"bytes_written":524288000,"total_bytes":3500000000,"speed":"45.2 MB/s","status":"in_progress"}
+{"stage":"Writing","percentage":30,"bytes_written":1048576000,"total_bytes":3500000000,"speed":"48.1 MB/s","status":"in_progress"}
+{"stage":"Verifying","percentage":50,"bytes_written":1750000000,"total_bytes":3500000000,"speed":"52.3 MB/s","status":"in_progress"}
+{"stage":"Complete","percentage":100,"bytes_written":3500000000,"total_bytes":3500000000,"status":"complete","hash":"a1b2c3d4..."}
+```
+
+**Progress fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `stage` | string | Current operation stage |
+| `percentage` | int | Progress 0-100 |
+| `bytes_written` | int64 | Bytes written so far (flash only) |
+| `total_bytes` | int64 | Total bytes to write (flash only) |
+| `speed` | string | Write speed formatted (flash only) |
+| `status` | string | `in_progress`, `complete`, or `error` |
+| `error` | string | Error message (only when status is `error`) |
+| `hash` | string | SHA-256 hash (flash only, when `--hash` flag used) |
+| `bytes_skipped` | int64 | Bytes skipped (flash only, when `--skip-unchanged` used) |
+
+### Error Codes
+
+| Code | Description |
+|------|-------------|
+| `USB_NOT_FOUND` | Specified USB device not found |
+| `PWSH_NOT_FOUND` | PowerShell 7 not installed or not in PATH |
+| `FORMAT_FAILED` | Format operation failed |
+| `FLASH_FAILED` | Flash operation failed |
+| `PERMISSION_DENIED` | Administrator privileges required |
+| `INVALID_INPUT` | Invalid command arguments |
+| `DISK_BUSY` | Another operation is in progress on this disk |
+| `INTERNAL_ERROR` | Unexpected internal error |
+
+### Integration Examples
+
+#### Node.js / Electron
+
+```javascript
+const { spawn } = require('child_process');
+
+// List devices
+function listDevices() {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('wusbkit.exe', ['list', '--json']);
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout.on('data', (data) => stdout += data);
+    proc.stderr.on('data', (data) => stderr += data);
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve(JSON.parse(stdout));
+      } else {
+        reject(JSON.parse(stderr));
+      }
+    });
+  });
+}
+
+// Flash with progress
+function flashDrive(drive, imagePath, onProgress) {
+  const proc = spawn('wusbkit.exe', [
+    'flash', drive,
+    '--image', imagePath,
+    '--json', '--yes'
+  ]);
+
+  proc.stdout.on('data', (data) => {
+    const lines = data.toString().trim().split('\n');
+    lines.forEach(line => {
+      try {
+        const progress = JSON.parse(line);
+        onProgress(progress);
+      } catch (e) {
+        // Handle partial JSON chunks if needed
+      }
+    });
+  });
+
+  proc.stderr.on('data', (data) => {
+    const error = JSON.parse(data.toString());
+    onProgress({ status: 'error', error: error.error, code: error.code });
+  });
+
+  return proc;
+}
+
+// Usage
+flashDrive('E:', 'ubuntu.iso', (progress) => {
+  console.log(`${progress.stage}: ${progress.percentage}% - ${progress.speed}`);
+});
+```
+
+#### Python
+
+```python
+import subprocess
+import json
+
+def list_devices():
+    result = subprocess.run(
+        ['wusbkit.exe', 'list', '--json'],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        return json.loads(result.stdout)
+    else:
+        raise Exception(json.loads(result.stderr))
+
+def flash_with_progress(drive, image_path):
+    proc = subprocess.Popen(
+        ['wusbkit.exe', 'flash', drive, '--image', image_path, '--json', '--yes'],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+
+    for line in proc.stdout:
+        progress = json.loads(line.strip())
+        yield progress
+```
+
+### Integration Tips
+
+1. **Always use `--json --yes` together** for non-interactive operation
+2. **Parse stdout line-by-line** for progress streaming
+3. **Check exit code AND stderr** for error detection
+4. **Handle `PERMISSION_DENIED`** by re-spawning with elevation
+5. **Check PowerShell first** with `wusbkit version --json` to verify `pwshVersion` is present
+6. **Graceful cancellation**: Send SIGINT (Ctrl+C) to cancel flash operations cleanly
+
+### Privilege Elevation
+
+Format and flash operations require administrator privileges. When running from a non-elevated process:
+
+**PowerShell elevation:**
+```powershell
+Start-Process -FilePath "wusbkit.exe" -ArgumentList "flash","E:","-i","image.iso","--json","--yes" -Verb RunAs -Wait
+```
+
+**Node.js with sudo-prompt:**
+```javascript
+const sudo = require('sudo-prompt');
+sudo.exec('wusbkit.exe flash E: --image image.iso --json --yes', options, callback);
+```
 
 ## Building
 
@@ -286,21 +511,36 @@ wusbkit/
 │   │   ├── device.go       # USB device data models
 │   │   └── enumerate.go    # USB enumeration logic
 │   ├── format/
-│   │   ├── diskpart.go     # diskpart script generation
 │   │   └── format.go       # Format orchestration
 │   ├── flash/
 │   │   ├── flash.go        # Flash orchestration
-│   │   └── source.go       # Image sources (file, zip, URL)
+│   │   ├── source.go       # Image sources (file, zip, URL, compressed)
+│   │   └── writer.go       # Raw disk writer with Windows API
+│   ├── lock/
+│   │   └── disklock.go     # Disk locking for concurrency control
 │   └── output/
-│       ├── json.go         # JSON output helpers
+│       ├── json.go         # JSON output helpers and error codes
 │       └── table.go        # pterm table formatters
 └── dist/                   # Build output (gitignored)
 ```
 
 ## Dependencies
 
-- [spf13/cobra](https://github.com/spf13/cobra) - CLI framework
-- [pterm/pterm](https://github.com/pterm/pterm) - Terminal output formatting
+### CLI Framework
+- [spf13/cobra](https://github.com/spf13/cobra) - Command-line interface framework
+
+### Terminal UI
+- [pterm/pterm](https://github.com/pterm/pterm) - Terminal output formatting, tables, spinners
+
+### Compression
+- [klauspost/compress](https://github.com/klauspost/compress) - Zstandard (zstd) decompression
+- [ulikunitz/xz](https://github.com/ulikunitz/xz) - XZ/LZMA decompression
+- Standard library `compress/gzip` - Gzip decompression
+- Standard library `archive/zip` - ZIP archive extraction
+
+### System
+- [gofrs/flock](https://github.com/gofrs/flock) - File-based locking for disk operations
+- [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys) - Windows system calls for raw disk I/O
 
 ## License
 
