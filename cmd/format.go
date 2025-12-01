@@ -84,16 +84,6 @@ func runFormat(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Check diskpart availability
-	if err := format.CheckDiskpartAvailable(); err != nil {
-		if jsonOutput {
-			output.PrintJSONError(err.Error(), output.ErrCodeInternalError)
-		} else {
-			PrintError(err.Error(), output.ErrCodeInternalError)
-		}
-		return err
-	}
-
 	// Find the device
 	enum := usb.NewEnumerator()
 	device, err := enum.GetDevice(identifier)
