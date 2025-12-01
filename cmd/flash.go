@@ -165,16 +165,7 @@ func runFlash(cmd *cobra.Command, args []string) error {
 
 	// Find the device
 	enum := usb.NewEnumerator()
-	var device *usb.Device
-	var err error
-
-	// Try to parse as disk number first
-	if diskNum, parseErr := strconv.Atoi(identifier); parseErr == nil {
-		device, err = enum.GetDeviceByDiskNumber(diskNum)
-	} else {
-		device, err = enum.GetDeviceByDriveLetter(identifier)
-	}
-
+	device, err := enum.GetDevice(identifier)
 	if err != nil {
 		if jsonOutput {
 			output.PrintJSONError(err.Error(), output.ErrCodeUSBNotFound)

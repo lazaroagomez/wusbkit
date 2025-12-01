@@ -1,8 +1,8 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/lazaroagomez/wusbkit/internal/output"
 	"github.com/lazaroagomez/wusbkit/internal/powershell"
@@ -52,16 +52,7 @@ func runEject(cmd *cobra.Command, args []string) error {
 
 	// Find the device
 	enum := usb.NewEnumerator()
-	var device *usb.Device
-	var err error
-
-	// Try to parse as disk number first
-	if diskNum, parseErr := strconv.Atoi(identifier); parseErr == nil {
-		device, err = enum.GetDeviceByDiskNumber(diskNum)
-	} else {
-		device, err = enum.GetDeviceByDriveLetter(identifier)
-	}
-
+	device, err := enum.GetDevice(identifier)
 	if err != nil {
 		if jsonOutput {
 			output.PrintJSONError(err.Error(), output.ErrCodeUSBNotFound)
@@ -79,7 +70,7 @@ func runEject(cmd *cobra.Command, args []string) error {
 		} else {
 			PrintError(errMsg, output.ErrCodeInvalidInput)
 		}
-		return fmt.Errorf(errMsg)
+		return errors.New(errMsg)
 	}
 
 	// Confirmation prompt (unless --yes or --json)
