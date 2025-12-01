@@ -129,7 +129,7 @@ func runFormat(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := diskLock.TryLock(cmd.Context(), 1*time.Second); err != nil {
-		errMsg := fmt.Sprintf("disk %d is currently being flashed by another operation", device.DiskNumber)
+		errMsg := fmt.Sprintf("disk %d is busy (another operation in progress)", device.DiskNumber)
 		if jsonOutput {
 			output.PrintJSONError(errMsg, output.ErrCodeDiskBusy)
 		} else {
