@@ -2,6 +2,7 @@ package usb
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/lazaroagomez/wusbkit/internal/powershell"
@@ -110,6 +111,16 @@ func (e *Enumerator) GetDeviceByDiskNumber(diskNumber int) (*Device, error) {
 	}
 
 	return nil, fmt.Errorf("USB disk %d: not found", diskNumber)
+}
+
+// GetDevice returns a USB device by disk number or drive letter.
+// It accepts identifiers like "2" (disk number) or "E" / "E:" (drive letter).
+func (e *Enumerator) GetDevice(identifier string) (*Device, error) {
+	// Try to parse as disk number first
+	if diskNum, err := strconv.Atoi(identifier); err == nil {
+		return e.GetDeviceByDiskNumber(diskNum)
+	}
+	return e.GetDeviceByDriveLetter(identifier)
 }
 
 // getUSBDisks returns all USB disk drives
