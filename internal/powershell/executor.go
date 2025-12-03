@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,27 @@ var (
 	ErrTimeout      = errors.New("PowerShell command timed out")
 	ErrExecution    = errors.New("PowerShell execution failed")
 )
+
+// Cached PowerShell path to avoid repeated exec.LookPath calls
+var (
+	cachedPwshPath string
+	pwshPathOnce   sync.Once
+	pwshPathErr    error
+)
+
+// getPwshPath returns the cached PowerShell executable path
+func getPwshPath() (string, error) {
+	pwshPathOnce.Do(func() {
+		cachedPwshPath, pwshPathErr = exec.LookPath("pwsh.exe")
+		if pwshPathErr != nil {
+			cachedPwshPath, pwshPathErr = exec.LookPath("pwsh")
+		}
+		if pwshPathErr != nil {
+			pwshPathErr = ErrPwshNotFound
+		}
+	})
+	return cachedPwshPath, pwshPathErr
+}
 
 // Executor runs PowerShell 7 commands and parses their output
 type Executor struct {
@@ -44,14 +66,10 @@ func (e *Executor) Execute(command string) ([]byte, error) {
 
 // ExecuteContext runs a PowerShell command with the given context
 func (e *Executor) ExecuteContext(ctx context.Context, command string) ([]byte, error) {
-	// Check if pwsh.exe is available
-	pwshPath, err := exec.LookPath("pwsh.exe")
+	// Get cached PowerShell path
+	pwshPath, err := getPwshPath()
 	if err != nil {
-		// Try pwsh without .exe extension
-		pwshPath, err = exec.LookPath("pwsh")
-		if err != nil {
-			return nil, ErrPwshNotFound
-		}
+		return nil, err
 	}
 
 	cmd := exec.CommandContext(ctx, pwshPath, "-NoProfile", "-NonInteractive", "-Command", command)
@@ -129,14 +147,8 @@ func (e *Executor) ExecuteJSONArray(command string, target interface{}) error {
 
 // CheckPwshAvailable verifies that PowerShell 7 is installed and accessible
 func CheckPwshAvailable() error {
-	_, err := exec.LookPath("pwsh.exe")
-	if err != nil {
-		_, err = exec.LookPath("pwsh")
-		if err != nil {
-			return ErrPwshNotFound
-		}
-	}
-	return nil
+	_, err := getPwshPath()
+	return err
 }
 
 // GetPwshVersion returns the PowerShell version string

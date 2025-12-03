@@ -1,16 +1,29 @@
 package usb
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/lazaroagomez/wusbkit/internal/powershell"
 )
 
+// deviceCache holds cached device enumeration results
+type deviceCache struct {
+	devices   []Device
+	timestamp time.Time
+	mu        sync.RWMutex
+}
+
+const cacheTTL = 2 * time.Second
+
 // Enumerator provides USB device enumeration capabilities
 type Enumerator struct {
-	ps *powershell.Executor
+	ps    *powershell.Executor
+	cache deviceCache
 }
 
 // NewEnumerator creates a new USB device enumerator
@@ -20,8 +33,143 @@ func NewEnumerator() *Enumerator {
 	}
 }
 
+// batchEnumerateResult holds all data from a single batched PowerShell query
+type batchEnumerateResult struct {
+	Disks      []psRawDisk           `json:"Disks"`
+	VidPid     []psRawWin32DiskDrive `json:"VidPid"`
+	Partitions []psRawPartition      `json:"Partitions"`
+	Volumes    []psRawVolume         `json:"Volumes"`
+}
+
+// Batched PowerShell script that collects all USB device data in one execution
+// This reduces 8+ PowerShell process spawns to just 1
+const batchEnumerateScript = `
+$disks = @(Get-Disk | Where-Object {$_.BusType -eq 'USB'} | Select-Object Number, FriendlyName, Model, SerialNumber, Size, PartitionStyle, HealthStatus, OperationalStatus, BusType)
+$vidpid = @(Get-CimInstance Win32_DiskDrive -Filter "InterfaceType='USB'" -ErrorAction SilentlyContinue | Select-Object Index, PNPDeviceID)
+$partitions = @(Get-Partition -ErrorAction SilentlyContinue | Where-Object {$_.DriveLetter} | Select-Object DiskNumber, DriveLetter)
+$volumes = @(Get-Volume -ErrorAction SilentlyContinue | Where-Object {$_.DriveLetter} | Select-Object DriveLetter, FileSystemLabel, FileSystem)
+@{Disks=$disks; VidPid=$vidpid; Partitions=$partitions; Volumes=$volumes} | ConvertTo-Json -Depth 10 -Compress
+`
+
 // ListDevices returns all connected USB storage devices
+// Uses caching to avoid repeated PowerShell calls within the TTL window
 func (e *Enumerator) ListDevices() ([]Device, error) {
+	// Check cache first
+	e.cache.mu.RLock()
+	if time.Since(e.cache.timestamp) < cacheTTL && e.cache.devices != nil {
+		devices := e.cache.devices
+		e.cache.mu.RUnlock()
+		return devices, nil
+	}
+	e.cache.mu.RUnlock()
+
+	// Cache miss - fetch fresh data using batched query
+	devices, err := e.listDevicesBatched()
+	if err != nil {
+		return nil, err
+	}
+
+	// Update cache
+	e.cache.mu.Lock()
+	e.cache.devices = devices
+	e.cache.timestamp = time.Now()
+	e.cache.mu.Unlock()
+
+	return devices, nil
+}
+
+// listDevicesBatched retrieves all USB device data in a single PowerShell execution
+// This is the main performance optimization - reduces 8+ process spawns to 1
+func (e *Enumerator) listDevicesBatched() ([]Device, error) {
+	output, err := e.ps.Execute(batchEnumerateScript)
+	if err != nil {
+		// Fallback to legacy method if batch fails
+		return e.listDevicesLegacy()
+	}
+
+	var result batchEnumerateResult
+	if err := parseJSON(output, &result); err != nil {
+		// Fallback to legacy method if parsing fails
+		return e.listDevicesLegacy()
+	}
+
+	if len(result.Disks) == 0 {
+		return []Device{}, nil
+	}
+
+	// Build VID/PID lookup map
+	vidPidMap := make(map[int]struct{ VID, PID string })
+	for _, drive := range result.VidPid {
+		vid, pid := ParseVIDPID(drive.PNPDeviceID)
+		if vid != "" && pid != "" {
+			vidPidMap[drive.Index] = struct{ VID, PID string }{vid, pid}
+		}
+	}
+
+	// Build partition lookup map (DiskNumber -> DriveLetter)
+	partitionMap := make(map[int]string)
+	for _, part := range result.Partitions {
+		if part.DriveLetter != "" {
+			partitionMap[part.DiskNumber] = part.DriveLetter
+		}
+	}
+
+	// Build volume lookup map (DriveLetter -> volume info)
+	volumeMap := make(map[string]psRawVolume)
+	for _, vol := range result.Volumes {
+		if vol.DriveLetter != "" {
+			volumeMap[vol.DriveLetter] = vol
+		}
+	}
+
+	// Build device list
+	devices := make([]Device, 0, len(result.Disks))
+	for _, disk := range result.Disks {
+		device := Device{
+			DiskNumber:     disk.Number,
+			FriendlyName:   disk.FriendlyName,
+			Model:          disk.Model,
+			SerialNumber:   disk.SerialNumber,
+			Size:           disk.Size,
+			SizeHuman:      FormatSize(disk.Size),
+			PartitionStyle: disk.PartitionStyle,
+			HealthStatus:   disk.HealthStatus,
+			BusType:        "USB",
+			Status:         e.getOperationalStatus(disk.OperationalStatus),
+		}
+
+		// Add VID/PID if available
+		if vp, ok := vidPidMap[disk.Number]; ok {
+			device.VendorID = vp.VID
+			device.ProductID = vp.PID
+		}
+
+		// Add partition/volume info if available
+		if driveLetter, ok := partitionMap[disk.Number]; ok {
+			device.DriveLetter = driveLetter + ":"
+			if vol, ok := volumeMap[driveLetter]; ok {
+				device.FileSystem = vol.FileSystem
+				device.VolumeLabel = vol.FileSystemLabel
+			}
+		}
+
+		devices = append(devices, device)
+	}
+
+	return devices, nil
+}
+
+// parseJSON unmarshals JSON output from PowerShell
+func parseJSON(data []byte, target interface{}) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	return json.Unmarshal([]byte(trimmed), target)
+}
+
+// listDevicesLegacy is the original implementation used as fallback
+func (e *Enumerator) listDevicesLegacy() ([]Device, error) {
 	// Get USB disks
 	disks, err := e.getUSBDisks()
 	if err != nil {

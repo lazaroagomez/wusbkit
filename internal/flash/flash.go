@@ -107,6 +107,10 @@ func (f *Flasher) Flash(ctx context.Context, opts Options) error {
 	return nil
 }
 
+// progressUpdateInterval controls how often progress updates are sent
+// This reduces CPU overhead from calculating/sending progress on every buffer
+const progressUpdateInterval = 100 * time.Millisecond
+
 // writeImage writes the source to the disk with progress updates
 // Returns: finalHash (empty if not calculated), bytesSkipped, error
 func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, writer *diskWriter, totalSize int64) (string, int64, error) {
@@ -119,6 +123,7 @@ func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, w
 	var bytesWritten int64
 	var bytesSkipped int64
 	startTime := time.Now()
+	lastProgressUpdate := startTime
 
 	// Initialize hash if requested
 	var hasher hash.Hash
@@ -163,11 +168,9 @@ func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, w
 		writeSize := alignSize(n)
 		writeBuffer := buffer[:writeSize]
 
-		// Zero-pad if needed
+		// Zero-pad if needed (optimized: use clear instead of byte-by-byte loop)
 		if writeSize > n {
-			for i := n; i < writeSize; i++ {
-				writeBuffer[i] = 0
-			}
+			clear(writeBuffer[n:writeSize])
 		}
 
 		// Skip-write: check if data on disk is already identical
@@ -195,19 +198,25 @@ func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, w
 
 		bytesWritten += int64(n)
 
-		// Calculate speed and send progress
-		elapsed := time.Since(startTime).Seconds()
-		speed := ""
-		if elapsed > 0 {
-			bytesPerSec := float64(bytesWritten) / elapsed
-			speed = formatSpeed(bytesPerSec)
-		}
+		// Throttle progress updates to reduce CPU overhead
+		now := time.Now()
+		if now.Sub(lastProgressUpdate) >= progressUpdateInterval {
+			lastProgressUpdate = now
 
-		percentage := int(float64(bytesWritten) / float64(totalSize) * 100)
-		if percentage > 100 {
-			percentage = 100 // Cap at 100% (can exceed if size was estimated)
+			// Calculate speed and send progress
+			elapsed := now.Sub(startTime).Seconds()
+			speed := ""
+			if elapsed > 0 {
+				bytesPerSec := float64(bytesWritten) / elapsed
+				speed = formatSpeed(bytesPerSec)
+			}
+
+			percentage := int(float64(bytesWritten) / float64(totalSize) * 100)
+			if percentage > 100 {
+				percentage = 100 // Cap at 100% (can exceed if size was estimated)
+			}
+			f.sendProgress(opts, StageWriting, percentage, bytesWritten, totalSize, speed)
 		}
-		f.sendProgress(opts, StageWriting, percentage, bytesWritten, totalSize, speed)
 	}
 
 	// Calculate final hash
@@ -238,6 +247,7 @@ func (f *Flasher) verifyImage(ctx context.Context, opts Options, writer *diskWri
 	diskBuffer := alignedBuffer(bufSize)
 	var bytesVerified int64
 	startTime := time.Now()
+	lastProgressUpdate := startTime
 
 	f.sendProgress(opts, StageVerifying, 0, 0, totalSize, "")
 
@@ -279,19 +289,25 @@ func (f *Flasher) verifyImage(ctx context.Context, opts Options, writer *diskWri
 
 		bytesVerified += int64(n)
 
-		// Calculate speed and send progress
-		elapsed := time.Since(startTime).Seconds()
-		speed := ""
-		if elapsed > 0 {
-			bytesPerSec := float64(bytesVerified) / elapsed
-			speed = formatSpeed(bytesPerSec)
-		}
+		// Throttle progress updates to reduce CPU overhead
+		now := time.Now()
+		if now.Sub(lastProgressUpdate) >= progressUpdateInterval {
+			lastProgressUpdate = now
 
-		percentage := int(float64(bytesVerified) / float64(totalSize) * 100)
-		if percentage > 100 {
-			percentage = 100 // Cap at 100% (can exceed if size was estimated)
+			// Calculate speed and send progress
+			elapsed := now.Sub(startTime).Seconds()
+			speed := ""
+			if elapsed > 0 {
+				bytesPerSec := float64(bytesVerified) / elapsed
+				speed = formatSpeed(bytesPerSec)
+			}
+
+			percentage := int(float64(bytesVerified) / float64(totalSize) * 100)
+			if percentage > 100 {
+				percentage = 100 // Cap at 100% (can exceed if size was estimated)
+			}
+			f.sendProgress(opts, StageVerifying, percentage, bytesVerified, totalSize, speed)
 		}
-		f.sendProgress(opts, StageVerifying, percentage, bytesVerified, totalSize, speed)
 	}
 
 	return nil
