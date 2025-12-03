@@ -52,7 +52,7 @@ $volumes = @(Get-Volume -ErrorAction SilentlyContinue | Where-Object {$_.DriveLe
 `
 
 // ListDevices returns all connected USB storage devices
-// Uses caching to avoid repeated PowerShell calls within the TTL window
+// Uses caching to avoid repeated calls within the TTL window
 func (e *Enumerator) ListDevices() ([]Device, error) {
 	// Check cache first
 	e.cache.mu.RLock()
@@ -63,10 +63,14 @@ func (e *Enumerator) ListDevices() ([]Device, error) {
 	}
 	e.cache.mu.RUnlock()
 
-	// Cache miss - fetch fresh data using batched query
-	devices, err := e.listDevicesBatched()
+	// Try native WMI first (fastest - no PowerShell process spawn)
+	devices, err := e.listDevicesNative()
 	if err != nil {
-		return nil, err
+		// Fallback to batched PowerShell if native WMI fails
+		devices, err = e.listDevicesBatched()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Update cache
