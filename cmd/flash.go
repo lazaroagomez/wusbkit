@@ -16,6 +16,7 @@ import (
 	"github.com/lazaroagomez/wusbkit/internal/format"
 	"github.com/lazaroagomez/wusbkit/internal/lock"
 	"github.com/lazaroagomez/wusbkit/internal/output"
+	"github.com/lazaroagomez/wusbkit/internal/parallel"
 	"github.com/lazaroagomez/wusbkit/internal/powershell"
 	"github.com/lazaroagomez/wusbkit/internal/usb"
 	"github.com/pterm/pterm"
@@ -23,14 +24,16 @@ import (
 )
 
 var (
-	flashImage         string
-	flashVerify        bool
-	flashYes           bool
-	flashBuffer        string
-	flashHash          bool
-	flashSkipUnchanged bool
-	flashMaxSize       string
-	flashForce         bool
+	flashImage          string
+	flashVerify         bool
+	flashYes            bool
+	flashBuffer         string
+	flashHash           bool
+	flashSkipUnchanged  bool
+	flashMaxSize        string
+	flashForce          bool
+	flashParallel       bool
+	flashMaxConcurrent  int
 )
 
 var flashCmd = &cobra.Command{
@@ -43,6 +46,7 @@ WARNING: This will COMPLETELY OVERWRITE the target drive!
 The drive can be specified by:
   - Drive letter (e.g., E: or E)
   - Disk number (e.g., 2)
+  - Multiple disks (e.g., 2,3,4 or 2-6 or 2,4-6,8)
 
 Supported image sources:
   - Local files: .img, .iso, .bin, .raw
@@ -52,7 +56,10 @@ Supported image sources:
 	Example: `  wusbkit flash 2 --image ubuntu.img
   wusbkit flash E: --image raspios.img.xz --verify
   wusbkit flash 2 --image debian.iso --yes --json
-  wusbkit flash E: --image https://example.com/image.img --hash`,
+  wusbkit flash E: --image https://example.com/image.img --hash
+  wusbkit flash 2,3,4 --image ubuntu.img --parallel --json --yes
+  wusbkit flash 2-6 --image raspios.img --parallel --yes
+  wusbkit flash 2,4-6,8 --image debian.iso --parallel --max-concurrent 3 --yes`,
 	Args: cobra.ExactArgs(1),
 	RunE: runFlash,
 }
@@ -66,6 +73,8 @@ func init() {
 	flashCmd.Flags().BoolVar(&flashSkipUnchanged, "skip-unchanged", false, "Skip writing sectors that haven't changed")
 	flashCmd.Flags().StringVar(&flashMaxSize, "max-size", "", "Maximum device size to allow (e.g., 64G, 256G)")
 	flashCmd.Flags().BoolVar(&flashForce, "force", false, "Override safety protections (system disk, size limits)")
+	flashCmd.Flags().BoolVar(&flashParallel, "parallel", false, "Flash same image to multiple disks in parallel")
+	flashCmd.Flags().IntVar(&flashMaxConcurrent, "max-concurrent", 0, "Max concurrent operations (0=unlimited)")
 	flashCmd.MarkFlagRequired("image")
 	rootCmd.AddCommand(flashCmd)
 }
@@ -124,6 +133,17 @@ func parseBufferSize(s string) (int, error) {
 }
 
 func runFlash(cmd *cobra.Command, args []string) error {
+	identifier := args[0]
+
+	// Check if parallel mode (explicit flag or multi-disk syntax)
+	if flashParallel || parallel.IsMultiDiskArg(identifier) {
+		return runParallelFlash(cmd, args)
+	}
+
+	return runSingleFlash(cmd, args)
+}
+
+func runSingleFlash(cmd *cobra.Command, args []string) error {
 	identifier := args[0]
 
 	// Check if image is a URL (skip file existence check for URLs)
@@ -331,7 +351,8 @@ func runFlash(cmd *cobra.Command, args []string) error {
 	// Start flash in background
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- flasher.Flash(ctx, opts)
+		_, _, err := flasher.Flash(ctx, opts)
+		errChan <- err
 	}()
 
 	// Show progress
@@ -385,5 +406,244 @@ func runFlash(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	return nil
+}
+
+// runParallelFlash flashes the same image to multiple disks in parallel
+func runParallelFlash(cmd *cobra.Command, args []string) error {
+	identifier := args[0]
+
+	// Parse disk numbers
+	disks, err := parallel.ParseDisks(identifier)
+	if err != nil {
+		if jsonOutput {
+			output.PrintJSONError(err.Error(), output.ErrCodeInvalidInput)
+		} else {
+			PrintError(err.Error(), output.ErrCodeInvalidInput)
+		}
+		return err
+	}
+
+	if len(disks) == 0 {
+		errMsg := "no valid disk numbers provided"
+		if jsonOutput {
+			output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
+		} else {
+			PrintError(errMsg, output.ErrCodeInvalidInput)
+		}
+		return errors.New(errMsg)
+	}
+
+	// Check if image is a URL (skip file existence check for URLs)
+	isURL := flash.IsURL(flashImage)
+
+	// Validate local image file exists (skip for URLs)
+	if !isURL {
+		if _, err := os.Stat(flashImage); os.IsNotExist(err) {
+			errMsg := fmt.Sprintf("Image file not found: %s", flashImage)
+			if jsonOutput {
+				output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
+			} else {
+				PrintError(errMsg, output.ErrCodeInvalidInput)
+			}
+			return errors.New(errMsg)
+		}
+	}
+
+	// Check for admin privileges
+	if !format.IsAdmin() {
+		errMsg := "Administrator privileges required for flashing"
+		if jsonOutput {
+			output.PrintJSONError(errMsg, output.ErrCodePermDenied)
+		} else {
+			PrintError(errMsg, output.ErrCodePermDenied)
+		}
+		return errors.New(errMsg)
+	}
+
+	// Check PowerShell availability
+	if err := powershell.CheckPwshAvailable(); err != nil {
+		if jsonOutput {
+			output.PrintJSONError("PowerShell 7 (pwsh.exe) is required but not found", output.ErrCodePwshNotFound)
+		} else {
+			PrintError("PowerShell 7 (pwsh.exe) is required but not found", output.ErrCodePwshNotFound)
+		}
+		return err
+	}
+
+	// Get image info for display
+	source, err := flash.OpenSource(flashImage)
+	if err != nil {
+		if jsonOutput {
+			output.PrintJSONError(err.Error(), output.ErrCodeInvalidInput)
+		} else {
+			PrintError(err.Error(), output.ErrCodeInvalidInput)
+		}
+		return err
+	}
+	imageSize := source.Size()
+	imageName := source.Name()
+	source.Close()
+
+	// Validate all disks exist, are USB, and can hold the image
+	enum := usb.NewEnumerator()
+	var deviceNames []string
+	for _, diskNum := range disks {
+		device, err := enum.GetDeviceByDiskNumber(diskNum)
+		if err != nil {
+			errMsg := fmt.Sprintf("disk %d: %v", diskNum, err)
+			if jsonOutput {
+				output.PrintJSONError(errMsg, output.ErrCodeUSBNotFound)
+			} else {
+				PrintError(errMsg, output.ErrCodeUSBNotFound)
+			}
+			return fmt.Errorf("disk %d: %w", diskNum, err)
+		}
+		if device == nil {
+			errMsg := fmt.Sprintf("disk %d: not found or not a USB device", diskNum)
+			if jsonOutput {
+				output.PrintJSONError(errMsg, output.ErrCodeUSBNotFound)
+			} else {
+				PrintError(errMsg, output.ErrCodeUSBNotFound)
+			}
+			return fmt.Errorf("disk %d: not found or not a USB device", diskNum)
+		}
+
+		// Validate image fits on device
+		if imageSize > device.Size {
+			errMsg := fmt.Sprintf("disk %d: image (%s) is larger than device (%s)",
+				diskNum, flash.FormatBytes(imageSize), device.SizeHuman)
+			if jsonOutput {
+				output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
+			} else {
+				PrintError(errMsg, output.ErrCodeInvalidInput)
+			}
+			return errors.New(errMsg)
+		}
+
+		// Safety checks (unless --force)
+		if !flashForce {
+			// Check max size limit
+			if flashMaxSize != "" {
+				maxSize, err := parseSize(flashMaxSize)
+				if err != nil {
+					if jsonOutput {
+						output.PrintJSONError(err.Error(), output.ErrCodeInvalidInput)
+					} else {
+						PrintError(err.Error(), output.ErrCodeInvalidInput)
+					}
+					return err
+				}
+				if maxSize > 0 && device.Size > maxSize {
+					errMsg := fmt.Sprintf("disk %d: size (%s) exceeds maximum allowed (%s)",
+						diskNum, device.SizeHuman, flashMaxSize)
+					if jsonOutput {
+						output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
+					} else {
+						PrintError(errMsg, output.ErrCodeInvalidInput)
+					}
+					return errors.New(errMsg)
+				}
+			}
+
+			// Check if this is a system disk
+			isSystem, _ := enum.IsSystemDisk(device.DiskNumber)
+			if isSystem {
+				errMsg := fmt.Sprintf("disk %d appears to be a system disk", diskNum)
+				if jsonOutput {
+					output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
+				} else {
+					PrintError(errMsg, output.ErrCodeInvalidInput)
+				}
+				return errors.New(errMsg)
+			}
+		}
+
+		deviceNames = append(deviceNames, fmt.Sprintf("%d (%s - %s)", diskNum, device.FriendlyName, device.SizeHuman))
+	}
+
+	// Confirmation prompt (unless --yes or --json)
+	if !flashYes && !jsonOutput {
+		pterm.Warning.Printf("This will COMPLETELY OVERWRITE %d drives:\n", len(disks))
+		for _, name := range deviceNames {
+			pterm.Info.Printf("  Disk %s\n", name)
+		}
+		pterm.Info.Printf("Image: %s (%s)\n", imageName, flash.FormatBytes(imageSize))
+
+		if flashVerify {
+			pterm.Info.Println("Verification: enabled")
+		}
+
+		confirmed, _ := pterm.DefaultInteractiveConfirm.
+			WithDefaultValue(false).
+			Show("Continue with parallel flash?")
+
+		if !confirmed {
+			pterm.Info.Println("Flash cancelled")
+			return nil
+		}
+	}
+
+	// Parse and validate buffer size
+	bufferMB, err := parseBufferSize(flashBuffer)
+	if err != nil {
+		if jsonOutput {
+			output.PrintJSONError(err.Error(), output.ErrCodeInvalidInput)
+		} else {
+			PrintError(err.Error(), output.ErrCodeInvalidInput)
+		}
+		return err
+	}
+	if bufferMB < 1 || bufferMB > 64 {
+		errMsg := fmt.Sprintf("buffer size must be between 1M and 64M (got %dM)", bufferMB)
+		if jsonOutput {
+			output.PrintJSONError(errMsg, output.ErrCodeInvalidInput)
+		} else {
+			PrintError(errMsg, output.ErrCodeInvalidInput)
+		}
+		return errors.New(errMsg)
+	}
+
+	// Build options
+	opts := flash.Options{
+		ImagePath:     flashImage,
+		Verify:        flashVerify,
+		BufferSize:    bufferMB,
+		CalculateHash: flashHash,
+		SkipUnchanged: flashSkipUnchanged,
+	}
+
+	// Setup context with cancellation for Ctrl+C
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle interrupt signal
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		if !jsonOutput {
+			pterm.Warning.Println("\nCancelling... (waiting for current operations)")
+		}
+		cancel()
+	}()
+
+	// Execute parallel flash
+	executor := parallel.NewExecutor(flashMaxConcurrent, jsonOutput)
+
+	if !jsonOutput {
+		pterm.Info.Printf("Flashing %d drives in parallel...\n", len(disks))
+	}
+
+	result := executor.FlashAll(ctx, disks, opts)
+
+	// Output result (non-JSON mode - JSON mode streams NDJSON)
+	if !jsonOutput {
+		parallel.PrintBatchResult(result, "Flashed")
+	}
+
+	if result.Failed > 0 {
+		return fmt.Errorf("%d drives failed to flash", result.Failed)
+	}
 	return nil
 }

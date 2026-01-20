@@ -8,6 +8,8 @@ A command-line toolkit for USB device management on Windows.
 - View detailed information about specific USB drives
 - Format USB drives with various filesystems (FAT32, NTFS, exFAT)
 - Flash disk images to USB drives (local files or remote URLs)
+- **Parallel operations** - Format or flash multiple USB drives simultaneously
+- **Set volume labels** without reformatting
 - Safely eject USB drives
 - JSON output mode for programmatic use and external application integration
 - **Native WMI enumeration** for ultra-fast device listing (no PowerShell overhead)
@@ -24,6 +26,14 @@ Device enumeration uses native Windows WMI queries via COM, bypassing PowerShell
 - **10-40x faster** device listing compared to PowerShell-based enumeration
 - Sub-200ms response time even with many USB devices connected
 - Automatic fallback to PowerShell if WMI fails
+
+### Internal Optimizations
+
+- **Parallel WMI queries**: All 4 WMI queries run concurrently (2-4x faster listing)
+- **Single HTTP request**: URL sources use GET directly (no HEAD request overhead)
+- **Buffer pooling**: Reusable aligned buffers reduce allocations during parallel operations
+- **Native volume enumeration**: WMI-based volume lookup replaces PowerShell calls
+- **Drive letter caching**: Known drive letters skip redundant lookups
 
 ## Requirements
 
@@ -143,6 +153,14 @@ wusbkit format E: --fs fat32 -y
 
 # Format by disk number
 wusbkit format 2 --fs ntfs --label DATA --yes
+
+# PARALLEL FORMAT - Multiple drives at once
+wusbkit format 2,3,4,5 --fs exfat --label "USB" --parallel --yes
+wusbkit format 2-6 --fs fat32 --parallel --yes
+wusbkit format 2,4-6,8 --fs exfat --parallel --max-concurrent 3 --yes
+
+# Parallel format with JSON output (NDJSON progress)
+wusbkit format 2,3,4 --fs exfat --parallel --json --yes
 ```
 
 **Filesystem options:**
@@ -151,6 +169,18 @@ wusbkit format 2 --fs ntfs --label DATA --yes
 | FAT32      | 4 GB          | Excellent      | Maximum device compatibility |
 | exFAT      | 16 EB         | Good           | Large files, cross-platform |
 | NTFS       | 16 EB         | Windows only   | Windows-only, permissions |
+
+**Parallel format flags:**
+| Flag | Description |
+|------|-------------|
+| `--parallel` | Enable parallel formatting |
+| `--max-concurrent N` | Limit concurrent operations (0=unlimited) |
+
+**Multi-disk syntax:**
+- Single disk: `2` or `E:`
+- Multiple disks: `2,3,4`
+- Range: `2-6`
+- Mixed: `2,4-6,8`
 
 ### Flash USB Drive
 
@@ -192,6 +222,14 @@ wusbkit flash E: --image ubuntu.img --yes
 
 # JSON output for progress
 wusbkit flash 2 --image debian.iso --json --yes
+
+# PARALLEL FLASH - Same image to multiple drives
+wusbkit flash 2,3,4 --image ubuntu.img --parallel --yes
+wusbkit flash 2-6 --image raspios.img --parallel --yes
+wusbkit flash 2,4-6,8 --image debian.iso --parallel --max-concurrent 3 --yes
+
+# Parallel flash with JSON output (NDJSON progress)
+wusbkit flash 2,3,4 --image ubuntu.img --parallel --json --yes
 ```
 
 **Supported image sources:**
@@ -201,6 +239,18 @@ wusbkit flash 2 --image debian.iso --json --yes
 | Compressed | .gz, .xz, .zst, .zstd | Streaming decompression |
 | Archives | .zip | Extracts first image file |
 | Remote URLs | HTTP/HTTPS | Streams directly to drive |
+
+**Parallel flash flags:**
+| Flag | Description |
+|------|-------------|
+| `--parallel` | Enable parallel flashing |
+| `--max-concurrent N` | Limit concurrent operations (0=unlimited) |
+
+**Multi-disk syntax:**
+- Single disk: `2` or `E:`
+- Multiple disks: `2,3,4`
+- Range: `2-6`
+- Mixed: `2,4-6,8`
 
 ### Eject USB Drive
 
@@ -220,6 +270,21 @@ wusbkit eject E: -y
 
 # JSON output
 wusbkit eject E: --json
+```
+
+### Set Volume Label
+
+Change the volume label of a USB drive without reformatting.
+
+> **Note:** This operation does not require administrator privileges for USB drives.
+
+```bash
+# Set label by drive letter
+wusbkit label E: --name "BACKUP_001"
+wusbkit label F --name "USB_DATA"
+
+# JSON output
+wusbkit label E: --name "MY_USB" --json
 ```
 
 ### Show Version
@@ -341,6 +406,33 @@ Long-running operations (`format` and `flash`) emit progress as **newline-delimi
 {"stage":"Verifying","percentage":50,"bytes_written":1750000000,"total_bytes":3500000000,"speed":"52.3 MB/s","status":"in_progress"}
 {"stage":"Complete","percentage":100,"bytes_written":3500000000,"total_bytes":3500000000,"status":"complete","hash":"a1b2c3d4..."}
 ```
+
+#### Parallel Operations Progress
+
+Parallel format/flash operations emit per-disk events:
+
+```json
+{"type":"start","diskNumber":2,"operation":"format"}
+{"type":"start","diskNumber":3,"operation":"format"}
+{"type":"start","diskNumber":4,"operation":"format"}
+{"type":"complete","diskNumber":2,"success":true,"duration":"12.5s"}
+{"type":"complete","diskNumber":4,"success":true,"duration":"14.2s"}
+{"type":"complete","diskNumber":3,"success":true,"duration":"15.1s"}
+{"type":"summary","total":3,"succeeded":3,"failed":0}
+```
+
+**Parallel progress fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Event type: `start`, `complete`, or `summary` |
+| `diskNumber` | int | Disk number (not in summary) |
+| `operation` | string | `format` or `flash` |
+| `success` | bool | Operation succeeded (complete events) |
+| `error` | string | Error message if failed |
+| `duration` | string | Operation duration (complete events) |
+| `total` | int | Total disks (summary only) |
+| `succeeded` | int | Successful count (summary only) |
+| `failed` | int | Failed count (summary only) |
 
 **Progress fields:**
 | Field | Type | Description |
@@ -511,9 +603,10 @@ wusbkit/
 │   ├── root.go             # Root command, global flags
 │   ├── list.go             # list command
 │   ├── info.go             # info command
-│   ├── format.go           # format command
-│   ├── flash.go            # flash command
+│   ├── format.go           # format command (supports --parallel)
+│   ├── flash.go            # flash command (supports --parallel)
 │   ├── eject.go            # eject command
+│   ├── label.go            # label command
 │   └── version.go          # version command
 ├── internal/
 │   ├── powershell/
@@ -521,13 +614,15 @@ wusbkit/
 │   ├── usb/
 │   │   ├── device.go           # USB device data models
 │   │   ├── enumerate.go        # USB enumeration logic (PowerShell fallback)
-│   │   └── enumerate_native.go # Native WMI enumeration (fast path)
+│   │   └── enumerate_native.go # Native WMI enumeration (parallel queries)
 │   ├── format/
 │   │   └── format.go       # Format orchestration
 │   ├── flash/
-│   │   ├── flash.go        # Flash orchestration
+│   │   ├── flash.go        # Flash orchestration with buffer pooling
 │   │   ├── source.go       # Image sources (file, zip, URL, compressed)
-│   │   └── writer.go       # Raw disk writer with Windows API
+│   │   └── writer.go       # Raw disk writer with WMI volume lookup
+│   ├── parallel/
+│   │   └── executor.go     # Parallel format/flash orchestration
 │   ├── lock/
 │   │   └── disklock.go     # Disk locking for concurrency control
 │   └── output/
@@ -554,6 +649,7 @@ wusbkit/
 - [StackExchange/wmi](https://github.com/StackExchange/wmi) - Native WMI queries for fast device enumeration
 - [gofrs/flock](https://github.com/gofrs/flock) - File-based locking for disk operations
 - [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys) - Windows system calls for raw disk I/O
+- [golang.org/x/sync](https://pkg.go.dev/golang.org/x/sync) - Concurrency primitives (errgroup for parallel operations)
 
 ## License
 

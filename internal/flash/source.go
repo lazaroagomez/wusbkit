@@ -406,8 +406,7 @@ func IsURL(path string) bool {
 }
 
 // newURLSource creates a new source that streams from a remote URL.
-// It performs a HEAD request first to get the content size, then opens
-// a GET request for streaming.
+// Uses a single GET request (no HEAD) for better performance.
 func newURLSource(rawURL string) (*urlSource, error) {
 	// Validate URL format
 	parsedURL, err := url.Parse(rawURL)
@@ -418,30 +417,10 @@ func newURLSource(rawURL string) (*urlSource, error) {
 		return nil, fmt.Errorf("unsupported URL scheme: %s (use http or https)", parsedURL.Scheme)
 	}
 
-	// Perform HEAD request to get content size and type
-	headResp, err := httpClient.Head(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to URL: %w", err)
-	}
-	headResp.Body.Close()
-
-	if headResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("server returned error: %s", headResp.Status)
-	}
-
-	// Get content size from Content-Length header
-	contentLength := headResp.ContentLength
-	if contentLength <= 0 {
-		return nil, fmt.Errorf("server did not provide content size (Content-Length header missing or invalid)")
-	}
-
-	// Detect filename and format from URL and headers
-	filename, isZip := detectURLType(rawURL, headResp)
-
-	// Open GET request for streaming
+	// Open GET request directly (skip HEAD for better performance)
 	getResp, err := httpClient.Get(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to start download: %w", err)
+		return nil, fmt.Errorf("failed to connect to URL: %w", err)
 	}
 
 	if getResp.StatusCode != http.StatusOK {
@@ -449,22 +428,30 @@ func newURLSource(rawURL string) (*urlSource, error) {
 		return nil, fmt.Errorf("server returned error: %s", getResp.Status)
 	}
 
-	src := &urlSource{
+	// Get content size from Content-Length header
+	contentLength := getResp.ContentLength
+	if contentLength <= 0 {
+		getResp.Body.Close()
+		return nil, fmt.Errorf("server did not provide content size (Content-Length header missing or invalid)")
+	}
+
+	// Detect filename and format from URL and headers
+	filename, isZip := detectURLType(rawURL, getResp)
+
+	// If it's a zip file, we cannot stream-extract from HTTP without downloading first
+	// because zip format requires random access to read the central directory.
+	if isZip {
+		getResp.Body.Close()
+		return nil, fmt.Errorf("zip files from URLs are not supported (zip format requires random access); download the file first or use a direct image URL")
+	}
+
+	return &urlSource{
 		resp:  getResp,
 		body:  getResp.Body,
 		size:  contentLength,
 		name:  filename,
-		isZip: isZip,
-	}
-
-	// If it's a zip file, we cannot stream-extract from HTTP without downloading first
-	// because zip format requires random access to read the central directory.
-	// For zip URLs, we'll read the whole response and handle it differently.
-	if isZip {
-		return nil, fmt.Errorf("zip files from URLs are not supported (zip format requires random access); download the file first or use a direct image URL")
-	}
-
-	return src, nil
+		isZip: false,
+	}, nil
 }
 
 // detectURLType determines the filename and format from a URL and HTTP response.

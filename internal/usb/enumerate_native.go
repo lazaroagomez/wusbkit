@@ -1,10 +1,13 @@
 package usb
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/StackExchange/wmi"
+	"golang.org/x/sync/errgroup"
 )
 
 // Win32_DiskDrive represents WMI Win32_DiskDrive class
@@ -76,30 +79,70 @@ type MSFT_Volume struct {
 }
 
 // listDevicesNative enumerates USB devices using native WMI (no PowerShell)
-// This is significantly faster than PowerShell, especially with many devices
+// This is significantly faster than PowerShell, especially with many devices.
+// WMI queries are run in parallel for maximum performance.
 func (e *Enumerator) listDevicesNative() ([]Device, error) {
-	// Query USB disk drives from Win32_DiskDrive (faster than MSFT_Disk)
+	// Data containers for parallel queries
 	var diskDrives []Win32_DiskDrive
-	query := "SELECT Index, Model, SerialNumber, Size, InterfaceType, PNPDeviceID, MediaType, Status FROM Win32_DiskDrive WHERE InterfaceType='USB'"
-	if err := wmi.Query(query, &diskDrives); err != nil {
-		return nil, fmt.Errorf("WMI query failed: %w", err)
+	var partitions []Win32_DiskPartition
+	var associations []Win32_LogicalDiskToPartition
+	var logicalDisks []Win32_LogicalDisk
+	var mu sync.Mutex
+
+	// Run all WMI queries in parallel using errgroup
+	g, _ := errgroup.WithContext(context.Background())
+
+	// Query USB disk drives (this is the critical one that must succeed)
+	g.Go(func() error {
+		query := "SELECT Index, Model, SerialNumber, Size, InterfaceType, PNPDeviceID, MediaType, Status FROM Win32_DiskDrive WHERE InterfaceType='USB'"
+		var drives []Win32_DiskDrive
+		if err := wmi.Query(query, &drives); err != nil {
+			return fmt.Errorf("WMI query failed: %w", err)
+		}
+		mu.Lock()
+		diskDrives = drives
+		mu.Unlock()
+		return nil
+	})
+
+	// Query all partitions (non-fatal if fails)
+	g.Go(func() error {
+		var parts []Win32_DiskPartition
+		wmi.Query("SELECT DiskIndex, Index, DeviceID FROM Win32_DiskPartition", &parts)
+		mu.Lock()
+		partitions = parts
+		mu.Unlock()
+		return nil
+	})
+
+	// Query logical disk to partition associations (non-fatal if fails)
+	g.Go(func() error {
+		var assocs []Win32_LogicalDiskToPartition
+		wmi.Query("SELECT Antecedent, Dependent FROM Win32_LogicalDiskToPartition", &assocs)
+		mu.Lock()
+		associations = assocs
+		mu.Unlock()
+		return nil
+	})
+
+	// Query logical disks (non-fatal if fails)
+	g.Go(func() error {
+		var disks []Win32_LogicalDisk
+		wmi.Query("SELECT DeviceID, FileSystem, VolumeName FROM Win32_LogicalDisk WHERE DriveType=2", &disks)
+		mu.Lock()
+		logicalDisks = disks
+		mu.Unlock()
+		return nil
+	})
+
+	// Wait for all queries to complete
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	if len(diskDrives) == 0 {
 		return []Device{}, nil
 	}
-
-	// Query all partitions
-	var partitions []Win32_DiskPartition
-	wmi.Query("SELECT DiskIndex, Index, DeviceID FROM Win32_DiskPartition", &partitions)
-
-	// Query logical disk to partition associations
-	var associations []Win32_LogicalDiskToPartition
-	wmi.Query("SELECT Antecedent, Dependent FROM Win32_LogicalDiskToPartition", &associations)
-
-	// Query logical disks (for drive letters and filesystem)
-	var logicalDisks []Win32_LogicalDisk
-	wmi.Query("SELECT DeviceID, FileSystem, VolumeName FROM Win32_LogicalDisk WHERE DriveType=2", &logicalDisks)
 
 	// Build partition to drive letter mapping
 	partitionToDrive := make(map[string]string)

@@ -45,9 +45,10 @@ type Options struct {
 	DiskNumber    int
 	ImagePath     string
 	Verify        bool
-	BufferSize    int  // Buffer size in MB (default: 4)
-	CalculateHash bool // Calculate SHA-256 hash while writing
-	SkipUnchanged bool // Skip writing sectors that haven't changed
+	BufferSize    int    // Buffer size in MB (default: 4)
+	CalculateHash bool   // Calculate SHA-256 hash while writing
+	SkipUnchanged bool   // Skip writing sectors that haven't changed
+	DriveLetter   string // Optional: cached drive letter to avoid WMI lookup
 }
 
 // Flasher handles USB drive flashing operations
@@ -68,43 +69,49 @@ func (f *Flasher) Progress() <-chan Progress {
 }
 
 // Flash writes an image to a USB drive
-func (f *Flasher) Flash(ctx context.Context, opts Options) error {
+// Returns error or nil on success. Also available via FlashWithStats for hash/skip stats.
+func (f *Flasher) Flash(ctx context.Context, opts Options) (string, int64, error) {
 	defer close(f.progressChan)
 
 	// Open the image source
 	source, err := OpenSource(opts.ImagePath)
 	if err != nil {
 		f.sendError(opts, err.Error())
-		return err
+		return "", 0, err
 	}
 	defer source.Close()
 
 	totalSize := source.Size()
 	f.sendProgress(opts, StageWriting, 0, 0, totalSize, "")
 
-	// Open the disk for writing
-	writer := newDiskWriter(opts.DiskNumber)
+	// Open the disk for writing (use cached drive letter if available)
+	var writer *diskWriter
+	if opts.DriveLetter != "" {
+		writer = newDiskWriterWithDriveLetter(opts.DiskNumber, opts.DriveLetter)
+	} else {
+		writer = newDiskWriter(opts.DiskNumber)
+	}
 	if err := writer.Open(); err != nil {
 		f.sendError(opts, err.Error())
-		return err
+		return "", 0, err
 	}
 	defer writer.Close()
 
 	// Write the image and get hash/skip stats
 	finalHash, bytesSkipped, err := f.writeImage(ctx, opts, source, writer, totalSize)
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 
 	// Verify if requested
 	if opts.Verify {
 		if err := f.verifyImage(ctx, opts, writer, totalSize); err != nil {
-			return err
+			return "", 0, err
 		}
 	}
 
 	f.sendComplete(opts, totalSize, finalHash, bytesSkipped)
-	return nil
+	return finalHash, bytesSkipped, nil
 }
 
 // progressUpdateInterval controls how often progress updates are sent
@@ -119,7 +126,11 @@ func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, w
 	if bufSize <= 0 {
 		bufSize = defaultBufferSize
 	}
-	buffer := alignedBuffer(bufSize)
+
+	// Get buffer from pool (or allocate if needed)
+	buffer := GetBuffer(bufSize)
+	defer PutBuffer(bufSize, buffer)
+
 	var bytesWritten int64
 	var bytesSkipped int64
 	startTime := time.Now()
@@ -134,7 +145,8 @@ func (f *Flasher) writeImage(ctx context.Context, opts Options, source Source, w
 	// Buffer for skip-write comparison
 	var diskBuffer []byte
 	if opts.SkipUnchanged {
-		diskBuffer = alignedBuffer(bufSize)
+		diskBuffer = GetBuffer(bufSize)
+		defer PutBuffer(bufSize, diskBuffer)
 	}
 
 	for {
@@ -243,8 +255,13 @@ func (f *Flasher) verifyImage(ctx context.Context, opts Options, writer *diskWri
 	if bufSize <= 0 {
 		bufSize = defaultBufferSize
 	}
-	sourceBuffer := alignedBuffer(bufSize)
-	diskBuffer := alignedBuffer(bufSize)
+
+	// Get buffers from pool
+	sourceBuffer := GetBuffer(bufSize)
+	defer PutBuffer(bufSize, sourceBuffer)
+	diskBuffer := GetBuffer(bufSize)
+	defer PutBuffer(bufSize, diskBuffer)
+
 	var bytesVerified int64
 	startTime := time.Now()
 	lastProgressUpdate := startTime

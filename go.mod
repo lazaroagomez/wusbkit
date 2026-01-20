@@ -9,6 +9,7 @@ require (
 	github.com/pterm/pterm v0.12.82
 	github.com/spf13/cobra v1.10.1
 	github.com/ulikunitz/xz v0.5.15
+	golang.org/x/sync v0.15.0
 	golang.org/x/sys v0.37.0
 )
 
