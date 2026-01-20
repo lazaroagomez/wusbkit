@@ -27,3 +27,7 @@ go.work.sum
 # Build output
 dist/
 info.md
+
+# Claude Code
+.claude/
+CLAUDE.md
