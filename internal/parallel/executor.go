@@ -8,19 +8,54 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/lazaroagomez/wusbkit/internal/flash"
 	"github.com/lazaroagomez/wusbkit/internal/format"
 	"github.com/lazaroagomez/wusbkit/internal/lock"
 )
 
+var (
+	kernel32        = syscall.NewLazyDLL("kernel32.dll")
+	setVolumeLabelW = kernel32.NewProc("SetVolumeLabelW")
+)
+
+// setVolumeLabel sets the volume label using Windows API
+func setVolumeLabel(driveLetter, label string) error {
+	rootPath := driveLetter + ":\\"
+	rootPtr, err := syscall.UTF16PtrFromString(rootPath)
+	if err != nil {
+		return err
+	}
+	labelPtr, err := syscall.UTF16PtrFromString(label)
+	if err != nil {
+		return err
+	}
+
+	ret, _, err := setVolumeLabelW.Call(
+		uintptr(unsafe.Pointer(rootPtr)),
+		uintptr(unsafe.Pointer(labelPtr)),
+	)
+	if ret == 0 {
+		return err
+	}
+	return nil
+}
+
+// LabelOptions contains options for labeling drives
+type LabelOptions struct {
+	Label string
+}
+
 // OperationResult represents the result of a single disk operation
 type OperationResult struct {
-	DiskNumber int    `json:"diskNumber"`
-	Success    bool   `json:"success"`
-	Error      string `json:"error,omitempty"`
-	Duration   string `json:"duration"`
+	DiskNumber  int    `json:"diskNumber,omitempty"`
+	DriveLetter string `json:"driveLetter,omitempty"`
+	Success     bool   `json:"success"`
+	Error       string `json:"error,omitempty"`
+	Duration    string `json:"duration"`
 }
 
 // BatchResult represents the result of a batch operation
@@ -33,13 +68,14 @@ type BatchResult struct {
 
 // ProgressEvent represents a progress event for NDJSON streaming
 type ProgressEvent struct {
-	Type       string `json:"type"`                 // "start", "progress", "complete", "summary"
-	DiskNumber int    `json:"diskNumber,omitempty"` // Only for disk-specific events
-	Operation  string `json:"operation,omitempty"`  // "format" or "flash"
-	Success    bool   `json:"success,omitempty"`
-	Error      string `json:"error,omitempty"`
-	Duration   string `json:"duration,omitempty"`
-	Percentage int    `json:"percentage,omitempty"`
+	Type        string `json:"type"`                  // "start", "progress", "complete", "summary"
+	DiskNumber  int    `json:"diskNumber,omitempty"`  // Only for disk-specific events
+	DriveLetter string `json:"driveLetter,omitempty"` // Only for drive-specific events (label)
+	Operation   string `json:"operation,omitempty"`   // "format", "flash", or "label"
+	Success     bool   `json:"success,omitempty"`
+	Error       string `json:"error,omitempty"`
+	Duration    string `json:"duration,omitempty"`
+	Percentage  int    `json:"percentage,omitempty"`
 	// For summary
 	Total     int `json:"total,omitempty"`
 	Succeeded int `json:"succeeded,omitempty"`
@@ -371,6 +407,100 @@ func (e *Executor) FlashAll(ctx context.Context, disks []int, opts flash.Options
 	return batch
 }
 
+// LabelAll labels multiple drives in parallel
+func (e *Executor) LabelAll(ctx context.Context, driveLetters []string, opts LabelOptions) BatchResult {
+	sem := make(chan struct{}, e.maxConcurrent)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	results := make([]OperationResult, len(driveLetters))
+
+	for i, dl := range driveLetters {
+		wg.Add(1)
+		go func(idx int, driveLetter string) {
+			defer wg.Done()
+
+			// Emit start event
+			e.emitEvent(ProgressEvent{
+				Type:        "start",
+				DriveLetter: driveLetter + ":",
+				Operation:   "label",
+			})
+
+			// Acquire semaphore
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				mu.Lock()
+				results[idx] = OperationResult{
+					DriveLetter: driveLetter + ":",
+					Success:     false,
+					Error:       "cancelled",
+				}
+				mu.Unlock()
+				e.emitEvent(ProgressEvent{
+					Type:        "complete",
+					DriveLetter: driveLetter + ":",
+					Operation:   "label",
+					Success:     false,
+					Error:       "cancelled",
+				})
+				return
+			}
+
+			start := time.Now()
+
+			// Execute label change using Windows API
+			err := setVolumeLabel(driveLetter, opts.Label)
+
+			result := OperationResult{
+				DriveLetter: driveLetter + ":",
+				Success:     err == nil,
+				Error:       errorString(err),
+				Duration:    time.Since(start).String(),
+			}
+
+			mu.Lock()
+			results[idx] = result
+			mu.Unlock()
+
+			e.emitEvent(ProgressEvent{
+				Type:        "complete",
+				DriveLetter: driveLetter + ":",
+				Operation:   "label",
+				Success:     err == nil,
+				Error:       errorString(err),
+				Duration:    result.Duration,
+			})
+		}(i, dl)
+	}
+
+	wg.Wait()
+
+	// Build summary
+	batch := BatchResult{
+		Results: results,
+		Total:   len(driveLetters),
+	}
+	for _, r := range results {
+		if r.Success {
+			batch.Succeeded++
+		} else {
+			batch.Failed++
+		}
+	}
+
+	// Emit summary event
+	e.emitEvent(ProgressEvent{
+		Type:      "summary",
+		Total:     batch.Total,
+		Succeeded: batch.Succeeded,
+		Failed:    batch.Failed,
+	})
+
+	return batch
+}
+
 func errorString(err error) string {
 	if err == nil {
 		return ""
@@ -447,7 +577,12 @@ func PrintBatchResult(result BatchResult, operation string) {
 		if !r.Success {
 			status = "FAILED: " + r.Error
 		}
-		fmt.Printf("  Disk %d: %s (%s)\n", r.DiskNumber, status, r.Duration)
+		// Use drive letter if available, otherwise use disk number
+		if r.DriveLetter != "" {
+			fmt.Printf("  Drive %s: %s (%s)\n", r.DriveLetter, status, r.Duration)
+		} else {
+			fmt.Printf("  Disk %d: %s (%s)\n", r.DiskNumber, status, r.Duration)
+		}
 	}
 }
 
