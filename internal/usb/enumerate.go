@@ -39,6 +39,14 @@ type batchEnumerateResult struct {
 	VidPid     []psRawWin32DiskDrive `json:"VidPid"`
 	Partitions []psRawPartition      `json:"Partitions"`
 	Volumes    []psRawVolume         `json:"Volumes"`
+	Locations  []psRawLocation       `json:"Locations"`
+}
+
+// psRawLocation holds USB hub port location info from PowerShell
+type psRawLocation struct {
+	Index            int    `json:"Index"`
+	LocationInfo     string `json:"LocationInfo"`
+	ParentInstanceId string `json:"ParentInstanceId"`
 }
 
 // Batched PowerShell script that collects all USB device data in one execution
@@ -48,7 +56,26 @@ $disks = @(Get-Disk | Where-Object {$_.BusType -eq 'USB'} | Select-Object Number
 $vidpid = @(Get-CimInstance Win32_DiskDrive -Filter "InterfaceType='USB'" -ErrorAction SilentlyContinue | Select-Object Index, PNPDeviceID)
 $partitions = @(Get-Partition -ErrorAction SilentlyContinue | Where-Object {$_.DriveLetter} | Select-Object DiskNumber, DriveLetter)
 $volumes = @(Get-Volume -ErrorAction SilentlyContinue | Where-Object {$_.DriveLetter} | Select-Object DriveLetter, FileSystemLabel, FileSystem)
-@{Disks=$disks; VidPid=$vidpid; Partitions=$partitions; Volumes=$volumes} | ConvertTo-Json -Depth 10 -Compress
+
+# Get USB hub port location info by walking up the device tree
+$locations = @()
+foreach ($drive in $vidpid) {
+    $currentId = $drive.PNPDeviceID
+    $locInfo = $null
+    $parentId = $null
+    for ($i = 0; $i -lt 10 -and $currentId; $i++) {
+        $loc = (Get-PnpDeviceProperty -InstanceId $currentId -KeyName 'DEVPKEY_Device_LocationInfo' -ErrorAction SilentlyContinue).Data
+        if ($loc -and $loc -match 'Port') {
+            $locInfo = $loc
+            $parentId = (Get-PnpDeviceProperty -InstanceId $currentId -KeyName 'DEVPKEY_Device_Parent' -ErrorAction SilentlyContinue).Data
+            break
+        }
+        $currentId = (Get-PnpDeviceProperty -InstanceId $currentId -KeyName 'DEVPKEY_Device_Parent' -ErrorAction SilentlyContinue).Data
+    }
+    $locations += @{Index=$drive.Index; LocationInfo=$locInfo; ParentInstanceId=$parentId}
+}
+
+@{Disks=$disks; VidPid=$vidpid; Partitions=$partitions; Volumes=$volumes; Locations=$locations} | ConvertTo-Json -Depth 10 -Compress
 `
 
 // ListDevices returns all connected USB storage devices
@@ -110,6 +137,15 @@ func (e *Enumerator) listDevicesBatched() ([]Device, error) {
 		}
 	}
 
+	// Build location lookup map (disk index -> location info)
+	locationMap := make(map[int]struct{ LocationInfo, ParentInstanceId string })
+	for _, loc := range result.Locations {
+		locationMap[loc.Index] = struct{ LocationInfo, ParentInstanceId string }{
+			LocationInfo:     loc.LocationInfo,
+			ParentInstanceId: loc.ParentInstanceId,
+		}
+	}
+
 	// Build partition lookup map (DiskNumber -> DriveLetter)
 	partitionMap := make(map[int]string)
 	for _, part := range result.Partitions {
@@ -157,6 +193,12 @@ func (e *Enumerator) listDevicesBatched() ([]Device, error) {
 			}
 		}
 
+		// Add location info if available
+		if loc, ok := locationMap[disk.Number]; ok {
+			device.LocationInfo = loc.LocationInfo
+			device.ParentInstanceId = loc.ParentInstanceId
+		}
+
 		devices = append(devices, device)
 	}
 
@@ -185,10 +227,11 @@ func (e *Enumerator) listDevicesLegacy() ([]Device, error) {
 	}
 
 	// Get VID/PID mapping from Win32_DiskDrive
-	vidPidMap, err := e.getVIDPIDMap()
+	vidPidMap, pnpDeviceIDMap, err := e.getVIDPIDAndPNPMap()
 	if err != nil {
 		// Non-fatal, continue without VID/PID
 		vidPidMap = make(map[int]struct{ VID, PID string })
+		pnpDeviceIDMap = make(map[int]string)
 	}
 
 	// Build device list
@@ -219,6 +262,13 @@ func (e *Enumerator) listDevicesLegacy() ([]Device, error) {
 			device.DriveLetter = partInfo.DriveLetter
 			device.FileSystem = partInfo.FileSystem
 			device.VolumeLabel = partInfo.VolumeLabel
+		}
+
+		// Get hub port location info using native cfgmgr32
+		if pnpID, ok := pnpDeviceIDMap[disk.Number]; ok {
+			locInfo, parentID, _ := GetHubPortLocation(pnpID)
+			device.LocationInfo = locInfo
+			device.ParentInstanceId = parentID
 		}
 
 		devices = append(devices, device)
@@ -287,24 +337,32 @@ func (e *Enumerator) getUSBDisks() ([]psRawDisk, error) {
 	return disks, nil
 }
 
-// getVIDPIDMap returns a map of disk index to VID/PID
+// getVIDPIDMap returns a map of disk index to VID/PID (for backwards compatibility)
 func (e *Enumerator) getVIDPIDMap() (map[int]struct{ VID, PID string }, error) {
+	vidPidMap, _, err := e.getVIDPIDAndPNPMap()
+	return vidPidMap, err
+}
+
+// getVIDPIDAndPNPMap returns maps of disk index to VID/PID and PNPDeviceID
+func (e *Enumerator) getVIDPIDAndPNPMap() (map[int]struct{ VID, PID string }, map[int]string, error) {
 	cmd := `Get-CimInstance Win32_DiskDrive -Filter "InterfaceType='USB'" | Select-Object Index, PNPDeviceID`
 
 	var drives []psRawWin32DiskDrive
 	if err := e.ps.ExecuteJSONArray(cmd, &drives); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	result := make(map[int]struct{ VID, PID string })
+	vidPidResult := make(map[int]struct{ VID, PID string })
+	pnpResult := make(map[int]string)
 	for _, drive := range drives {
 		vid, pid := ParseVIDPID(drive.PNPDeviceID)
 		if vid != "" && pid != "" {
-			result[drive.Index] = struct{ VID, PID string }{vid, pid}
+			vidPidResult[drive.Index] = struct{ VID, PID string }{vid, pid}
 		}
+		pnpResult[drive.Index] = drive.PNPDeviceID
 	}
 
-	return result, nil
+	return vidPidResult, pnpResult, nil
 }
 
 // partitionInfo holds volume information for a partition

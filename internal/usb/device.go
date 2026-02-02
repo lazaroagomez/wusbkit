@@ -7,22 +7,24 @@ import (
 
 // Device represents a USB storage device
 type Device struct {
-	DriveLetter    string `json:"driveLetter"`
-	DiskNumber     int    `json:"diskNumber"`
-	FriendlyName   string `json:"friendlyName"`
-	Model          string `json:"model"`
-	Size           int64  `json:"size"`
-	SizeHuman      string `json:"sizeHuman"`
-	SerialNumber   string `json:"serialNumber"`
-	VendorID       string `json:"vendorId"`
-	ProductID      string `json:"productId"`
-	FileSystem     string `json:"fileSystem"`
-	VolumeLabel    string `json:"volumeLabel"`
-	PartitionStyle string `json:"partitionStyle"`
-	Status         string `json:"status"`
-	HealthStatus   string `json:"healthStatus"`
-	BusType        string `json:"busType"`
-	MediaType      string `json:"mediaType"`
+	DriveLetter      string `json:"driveLetter"`
+	DiskNumber       int    `json:"diskNumber"`
+	FriendlyName     string `json:"friendlyName"`
+	Model            string `json:"model"`
+	Size             int64  `json:"size"`
+	SizeHuman        string `json:"sizeHuman"`
+	SerialNumber     string `json:"serialNumber"`
+	VendorID         string `json:"vendorId"`
+	ProductID        string `json:"productId"`
+	FileSystem       string `json:"fileSystem"`
+	VolumeLabel      string `json:"volumeLabel"`
+	PartitionStyle   string `json:"partitionStyle"`
+	Status           string `json:"status"`
+	HealthStatus     string `json:"healthStatus"`
+	BusType          string `json:"busType"`
+	MediaType        string `json:"mediaType"`
+	LocationInfo     string `json:"locationInfo"`     // USB hub port location (e.g., "Port_#0002.Hub_#0002")
+	ParentInstanceId string `json:"parentInstanceId"` // Parent hub instance ID (e.g., "USB\VID_2109&PID_0822\...")
 }
 
 // FormatSize converts bytes to human-readable format

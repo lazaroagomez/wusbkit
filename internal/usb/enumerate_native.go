@@ -170,8 +170,10 @@ func (e *Enumerator) listDevicesNative() ([]Device, error) {
 		driveToLogical[ld.DeviceID] = ld
 	}
 
-	// Build device list
+	// Build device list and collect PNPDeviceIDs for location lookup
 	devices := make([]Device, 0, len(diskDrives))
+	pnpDeviceIDs := make([]string, 0, len(diskDrives))
+
 	for _, disk := range diskDrives {
 		vid, pid := ParseVIDPID(disk.PNPDeviceID)
 
@@ -201,6 +203,33 @@ func (e *Enumerator) listDevicesNative() ([]Device, error) {
 		}
 
 		devices = append(devices, device)
+		pnpDeviceIDs = append(pnpDeviceIDs, disk.PNPDeviceID)
+	}
+
+	// Fetch hub port location info in parallel for all devices
+	if len(devices) > 0 {
+		locationResults := make([]struct {
+			locationInfo     string
+			parentInstanceId string
+		}, len(devices))
+
+		g2, _ := errgroup.WithContext(context.Background())
+		for i, pnpID := range pnpDeviceIDs {
+			i, pnpID := i, pnpID // capture loop variables
+			g2.Go(func() error {
+				locInfo, parentID, _ := GetHubPortLocation(pnpID)
+				locationResults[i].locationInfo = locInfo
+				locationResults[i].parentInstanceId = parentID
+				return nil
+			})
+		}
+		g2.Wait()
+
+		// Apply location results to devices
+		for i := range devices {
+			devices[i].LocationInfo = locationResults[i].locationInfo
+			devices[i].ParentInstanceId = locationResults[i].parentInstanceId
+		}
 	}
 
 	return devices, nil

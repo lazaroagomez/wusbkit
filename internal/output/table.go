@@ -45,7 +45,7 @@ func printSimpleTable(devices []usb.Device) {
 
 func printVerboseTable(devices []usb.Device) {
 	tableData := pterm.TableData{
-		{"Drive", "Name", "Size", "Serial", "VID:PID", "FS", "Partition", "Status"},
+		{"Drive", "Name", "Size", "Serial", "VID:PID", "Port", "FS", "Partition", "Status"},
 	}
 
 	for _, d := range devices {
@@ -57,6 +57,11 @@ func printVerboseTable(devices []usb.Device) {
 		vidPid := ""
 		if d.VendorID != "" && d.ProductID != "" {
 			vidPid = d.VendorID + ":" + d.ProductID
+		}
+
+		port := usb.ParsePortNumber(d.LocationInfo)
+		if port == "" {
+			port = "-"
 		}
 
 		fs := d.FileSystem
@@ -72,6 +77,7 @@ func printVerboseTable(devices []usb.Device) {
 			d.SizeHuman,
 			d.SerialNumber,
 			vidPid,
+			port,
 			fs,
 			d.PartitionStyle,
 			status,
@@ -98,6 +104,16 @@ func PrintDeviceInfo(device *usb.Device) {
 	}
 	if device.ProductID != "" {
 		pairs = append(pairs, []string{"Product ID", device.ProductID})
+	}
+
+	// Add location info if available
+	if device.LocationInfo != "" {
+		port := usb.ParsePortNumber(device.LocationInfo)
+		pairs = append(pairs, []string{"Hub Port", port})
+		pairs = append(pairs, []string{"Location Info", device.LocationInfo})
+	}
+	if device.ParentInstanceId != "" {
+		pairs = append(pairs, []string{"Parent Hub", device.ParentInstanceId})
 	}
 
 	pairs = append(pairs,
